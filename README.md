@@ -19,7 +19,7 @@ A unified orchestration dashboard that sits on top of **ShadowCast** (video rend
           ▼                   ▼                   ▼
    ┌─────────────┐   ┌──────────────┐   ┌──────────────┐
    │  ShadowCast │   │     APF      │   │   Ollama     │
-   │  (port 5000)│   │  (port 3001) │   │ (port 11434) │
+   │  (port 8000)│   │  (port 3000) │   │ (port 11434) │
    └─────────────┘   └──────────────┘   └──────────────┘
 ```
 
@@ -47,8 +47,8 @@ Optimized for:
 1. **Python 3.10+** with pip
 2. **Node.js 18+** with npm
 3. **Ollama** installed and running (`ollama serve`)
-4. **ShadowCast** running on `localhost:5000`
-5. **APF** running on `localhost:3001`
+4. **ShadowCast** running on `localhost:8000`
+5. **APF** running on `localhost:3000`
 
 ## Quick Start
 
@@ -95,13 +95,13 @@ curl -fsSL https://ollama.com/install.sh | sh
 
 ```bash
 # Fast all-rounder (5GB VRAM)
-ollama pull llama3:8b
+ollama pull llama3.1:8b
 
 # Creative writing alternative (4.5GB VRAM)
-ollama pull mistral:7b
+ollama pull mistral:7b-instruct
 
 # Heavy reasoning — uses most of your 16GB VRAM
-ollama pull mixtral:8x7b-instruct-v0.1-q4_K_M
+ollama pull qwen2.5:14b-instruct-q5_K_M
 ```
 
 ### Start Ollama
@@ -137,13 +137,13 @@ The backend exposes a REST API on port 8100:
 
 | Setting | Default Value |
 |---|---|
-| ShadowCast URL | `http://localhost:5000` |
-| APF URL | `http://localhost:3001` |
+| ShadowCast URL | `http://localhost:8000` |
+| APF URL | `http://localhost:3000` |
 | Ollama URL | `http://localhost:11434` |
-| Script Model | `llama3:8b` |
-| Analysis Model | `llama3:8b` |
-| Creative Model | `mistral:7b` |
-| Heavy Model | `mixtral:8x7b-instruct-v0.1-q4_K_M` |
+| Script Model | `llama3.1:8b` |
+| Analysis Model | `llama3.1:8b` |
+| Creative Model | `mistral:7b-instruct` |
+| Heavy Model | `qwen2.5:14b-instruct-q5_K_M` |
 
 All settings are configurable from the dashboard Settings page.
 
