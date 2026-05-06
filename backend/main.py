@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import sqlite3
+import time
 import uuid
 
 # ── App Setup ─────────────────────────────────────────────────────────
@@ -35,12 +36,12 @@ app.add_middleware(
 DB_PATH = os.path.join(os.path.dirname(__file__), "mission_control.db")
 
 DEFAULT_CONFIG = {
-    "shadowcast_url": "http://localhost:5000",
-    "apf_url": "http://localhost:3001",
+    "shadowcast_url": "http://localhost:8000",
+    "apf_url": "http://localhost:3000",
     "ollama_url": "http://localhost:11434",
-    "default_script_model": "llama3:8b",
-    "default_analysis_model": "llama3:8b",
-    "default_creative_model": "mistral:7b",
+    "default_script_model": "llama3.1:8b",
+    "default_analysis_model": "llama3.1:8b",
+    "default_creative_model": "mistral:7b-instruct",
     "heavy_reasoning_model": "mixtral:8x7b-instruct-v0.1-q4_K_M",
 }
 
@@ -252,9 +253,9 @@ async def list_ollama_models():
                     "status": "ok",
                     "models": models,
                     "recommended": {
-                        "script_generation": config.get("default_script_model", "llama3:8b"),
-                        "product_analysis": config.get("default_analysis_model", "llama3:8b"),
-                        "creative_writing": config.get("default_creative_model", "mistral:7b"),
+                        "script_generation": config.get("default_script_model", "llama3.1:8b"),
+                        "product_analysis": config.get("default_analysis_model", "llama3.1:8b"),
+                        "creative_writing": config.get("default_creative_model", "mistral:7b-instruct"),
                         "heavy_reasoning": config.get("heavy_reasoning_model", "mixtral:8x7b-instruct-v0.1-q4_K_M"),
                     },
                 }
@@ -319,20 +320,33 @@ async def list_products(
 
 @app.post("/api/products/import")
 async def import_products_from_apf(req: ProductImport):
-    """Pull products from APF scraper into Mission Control."""
+    """Pull products from APF scraper into Mission Control via tRPC."""
     config = get_config()
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
+            # APF uses tRPC — call products.list procedure
+            trpc_input = json.dumps({
+                "json": {
+                    "platform": req.marketplace,
+                    "limit": req.limit,
+                    "offset": 0,
+                }
+            })
             r = await client.get(
-                f"{config['apf_url']}/api/products",
-                params={"marketplace": req.marketplace, "limit": req.limit},
+                f"{config['apf_url']}/api/trpc/products.list",
+                params={"input": trpc_input},
             )
             if r.status_code == 200:
-                products = r.json().get("products", [])
+                # tRPC wraps response in {"result": {"data": {"json": [...] }}}
+                data = r.json()
+                products = data.get("result", {}).get("data", {}).get("json", [])
+                if not products and isinstance(data.get("result", {}).get("data"), list):
+                    products = data["result"]["data"]
                 conn = get_db()
                 imported = 0
                 for p in products:
                     pid = str(uuid.uuid4())
+                    # Map APF fields to MC schema
                     conn.execute(
                         """INSERT OR IGNORE INTO products
                         (id, name, marketplace, price, commission, gravity_score,
@@ -342,11 +356,11 @@ async def import_products_from_apf(req: ProductImport):
                             pid,
                             p.get("name", "Unknown"),
                             req.marketplace,
-                            p.get("price", ""),
-                            p.get("commission", ""),
-                            p.get("gravity_score", 0),
+                            p.get("aggregateSales", ""),  # APF has no 'price' field
+                            p.get("commissionRate", ""),  # APF: commissionRate
+                            float(p.get("hiddenGemScore", 0) or 0),  # APF: hiddenGemScore
                             p.get("category", ""),
-                            p.get("url", ""),
+                            p.get("affiliateLink", ""),  # APF: affiliateLink
                             p.get("description", ""),
                             datetime.now().isoformat(),
                         ),
@@ -359,6 +373,13 @@ async def import_products_from_apf(req: ProductImport):
                     f"{imported} products from {req.marketplace}",
                 )
                 return {"status": "ok", "imported": imported}
+            else:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"APF returned {r.status_code}: {r.text[:200]}",
+                )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"APF unreachable: {e}")
 
@@ -394,7 +415,7 @@ Provide a brief analysis covering:
             r = await client.post(
                 f"{config['ollama_url']}/api/generate",
                 json={
-                    "model": config.get("default_analysis_model", "llama3:8b"),
+                    "model": config.get("default_analysis_model", "llama3.1:8b"),
                     "prompt": prompt,
                     "stream": False,
                 },
@@ -454,7 +475,7 @@ async def create_video_job(req: VideoJobCreate, background_tasks: BackgroundTask
 
     config = get_config()
     job_id = str(uuid.uuid4())
-    model = req.script_model or config.get("default_script_model", "llama3:8b")
+    model = req.script_model or config.get("default_script_model", "llama3.1:8b")
 
     conn.execute(
         """INSERT INTO video_jobs
@@ -474,7 +495,9 @@ async def create_video_job(req: VideoJobCreate, background_tasks: BackgroundTask
 
 
 async def run_video_job(job_id: str):
-    """Background task: generate script via Ollama, then render via ShadowCast."""
+    """Background task: submit to ShadowCast /api/generate and poll until complete.
+    ShadowCast handles both script generation AND video rendering in one async job.
+    """
     conn = get_db()
     job = conn.execute("SELECT * FROM video_jobs WHERE id = ?", (job_id,)).fetchone()
     if not job:
@@ -493,42 +516,80 @@ async def run_video_job(job_id: str):
     )
     conn.commit()
 
+    # Determine formats based on job_type
+    formats = []
+    if job["job_type"] in ("short", "both"):
+        formats.append("short_form")
+    if job["job_type"] in ("long", "both"):
+        formats.append("long_form")
+    if not formats:
+        formats = ["short_form", "long_form"]
+
     try:
-        # Step 1: Generate script via ShadowCast API
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        # Step 1: Submit job to ShadowCast /api/generate
+        # ShadowCast expects GenerateRequest with nested product_info
+        generate_payload = {
+            "product_info": {
+                "product_name": product["name"],
+                "niche": product["category"] or "General",
+                "price": product["price"] or "$49.99",
+                "affiliate_link": product["url"] or "[YOUR_AFFILIATE_LINK]",
+                "key_features": [],
+                "keywords": [],
+                "target_audience": "General consumers",
+                "product_category": product["category"] or "General",
+            },
+            "hook_types": ["curiosity"],
+            "formats": formats,
+        }
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(
                 f"{config['shadowcast_url']}/api/generate",
-                json={
-                    "product_name": product["name"],
-                    "price": product["price"],
-                    "product_url": product["url"],
-                    "description": product["description"],
-                    "category": product["category"],
-                },
+                json=generate_payload,
             )
             if r.status_code != 200:
-                raise Exception(f"ShadowCast script generation failed: {r.status_code}")
+                raise Exception(f"ShadowCast generation failed: {r.status_code} - {r.text[:200]}")
 
-            script_data = r.json()
-            conn.execute(
-                "UPDATE video_jobs SET status = 'rendering', script_json = ? WHERE id = ?",
-                (json.dumps(script_data), job_id),
-            )
-            conn.commit()
+            sc_job = r.json()
+            sc_job_id = sc_job.get("job_id")
+            if not sc_job_id:
+                raise Exception("ShadowCast did not return a job_id")
 
-        # Step 2: Render video via ShadowCast
-        async with httpx.AsyncClient(timeout=600.0) as client:
-            r = await client.post(
-                f"{config['shadowcast_url']}/api/render",
-                json={
-                    "script": script_data,
-                    "product_name": product["name"],
-                    "price": product["price"],
-                    "job_type": job["job_type"],
-                },
-            )
-            if r.status_code == 200:
-                result = r.json()
+        conn.execute(
+            "UPDATE video_jobs SET status = 'rendering', script_json = ? WHERE id = ?",
+            (json.dumps({"shadowcast_job_id": sc_job_id}), job_id),
+        )
+        conn.commit()
+
+        # Step 2: Poll ShadowCast /api/status/{job_id} until complete
+        max_polls = 360  # 30 min max (5s intervals)
+        for _ in range(max_polls):
+            await asyncio.sleep(5)
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(f"{config['shadowcast_url']}/api/status/{sc_job_id}")
+                if r.status_code != 200:
+                    continue
+                status_data = r.json()
+
+            sc_status = status_data.get("status", "")
+            if sc_status == "complete":
+                # Fetch results
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    r = await client.get(f"{config['shadowcast_url']}/api/results/{sc_job_id}")
+                    result = r.json() if r.status_code == 200 else {}
+
+                # Extract video paths from results
+                short_path = ""
+                long_path = ""
+                hooks = result.get("results", {})
+                for hook_data in hooks.values():
+                    videos = hook_data.get("videos", {}) if isinstance(hook_data, dict) else {}
+                    if "short_form" in videos:
+                        short_path = f"{config['shadowcast_url']}/api/download/{sc_job_id}/{videos['short_form']}"
+                    if "long_form" in videos:
+                        long_path = f"{config['shadowcast_url']}/api/download/{sc_job_id}/{videos['long_form']}"
+
                 conn.execute(
                     """UPDATE video_jobs SET
                     status = 'completed',
@@ -536,16 +597,18 @@ async def run_video_job(job_id: str):
                     long_form_path = ?,
                     completed_at = datetime('now')
                     WHERE id = ?""",
-                    (
-                        result.get("short_form_path", ""),
-                        result.get("long_form_path", ""),
-                        job_id,
-                    ),
+                    (short_path, long_path, job_id),
                 )
                 conn.commit()
                 log_activity("job_completed", f"Job {job_id} for {product['name']}")
-            else:
-                raise Exception(f"ShadowCast render failed: {r.status_code}")
+                return
+
+            elif sc_status == "error":
+                errors = status_data.get("errors", ["Unknown error"])
+                raise Exception(f"ShadowCast error: {'; '.join(errors)}")
+
+        # If we get here, polling timed out
+        raise Exception("ShadowCast job timed out after 30 minutes")
 
     except Exception as e:
         conn.execute(
