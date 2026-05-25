@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../utils/api'
-import { Settings, Save, RefreshCw, CheckCircle, Server, Brain, Film, ShoppingBag } from 'lucide-react'
+import { Settings, Save, RefreshCw, CheckCircle, Server, Brain, Film, ShoppingBag, Lock } from 'lucide-react'
 
 interface ConfigField {
   key: string
@@ -14,6 +14,7 @@ const CONFIG_FIELDS: ConfigField[] = [
   { key: 'shadowcast_url', label: 'ShadowCast URL', description: 'Base URL for the ShadowCast Flask backend', icon: Film, group: 'Services' },
   { key: 'apf_url', label: 'APF URL', description: 'Base URL for the APF Node.js backend', icon: ShoppingBag, group: 'Services' },
   { key: 'ollama_url', label: 'Ollama URL', description: 'Base URL for the Ollama API', icon: Brain, group: 'Services' },
+  { key: 'internal_service_secret', label: 'Internal Service Secret', description: 'Shared secret for mission-control to talk to APF and ShadowCast', icon: Lock, group: 'Services' },
   { key: 'default_script_model', label: 'Script Generation Model', description: 'Ollama model used for generating video scripts', icon: Brain, group: 'Models' },
   { key: 'default_analysis_model', label: 'Product Analysis Model', description: 'Ollama model used for analyzing affiliate products', icon: Brain, group: 'Models' },
   { key: 'default_creative_model', label: 'Creative Writing Model', description: 'Ollama model for creative/alternative script styles', icon: Brain, group: 'Models' },

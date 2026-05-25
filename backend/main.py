@@ -38,6 +38,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "mission_control.db")
 DEFAULT_CONFIG = {
     "shadowcast_url": "http://localhost:8000",
     "apf_url": "http://localhost:3000",
+    "internal_service_secret": "mc_apf_shadow_secret_2024",
     "ollama_url": "http://localhost:11434",
     "default_script_model": "llama3.1:8b",
     "default_analysis_model": "llama3.1:8b",
@@ -335,6 +336,7 @@ async def import_products_from_apf(req: ProductImport):
             r = await client.get(
                 f"{config['apf_url']}/api/trpc/products.list",
                 params={"input": trpc_input},
+                headers={"X-Service-Key": config.get("internal_service_secret", "")}
             )
             if r.status_code == 200:
                 # tRPC wraps response in {"result": {"data": {"json": [...] }}}
@@ -547,6 +549,7 @@ async def run_video_job(job_id: str):
             r = await client.post(
                 f"{config['shadowcast_url']}/api/generate",
                 json=generate_payload,
+                headers={"X-Service-Key": config.get("internal_service_secret", "")}
             )
             if r.status_code != 200:
                 raise Exception(f"ShadowCast generation failed: {r.status_code} - {r.text[:200]}")
