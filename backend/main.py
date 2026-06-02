@@ -38,7 +38,8 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "mission_control.db")
 DEFAULT_CONFIG = {
     "shadowcast_url": "http://localhost:8000",
     "apf_url": "http://localhost:3000",
-    "internal_service_secret": "mc_apf_shadow_secret_2024",
+    # Read internal service secret from environment to avoid hardcoding secrets
+    "internal_service_secret": os.environ.get("INTERNAL_SERVICE_SECRET", ""),
     "ollama_url": "http://localhost:11434",
     "default_script_model": "llama3.1:8b",
     "default_analysis_model": "llama3.1:8b",
