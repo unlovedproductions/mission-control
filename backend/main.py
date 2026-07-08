@@ -77,7 +77,14 @@ def init_db():
             scraped_at TEXT DEFAULT '',
             status TEXT DEFAULT 'new',
             ai_analysis TEXT DEFAULT '',
-            created_at TEXT DEFAULT (datetime('now'))
+            created_at TEXT DEFAULT (datetime('now')),
+            apf_product_id TEXT DEFAULT '',
+            recommended_content_style TEXT DEFAULT '',
+            competitors TEXT DEFAULT '[]',
+            review_brief TEXT DEFAULT '{}',
+            enriched_payload TEXT DEFAULT '',
+            product_info_json TEXT DEFAULT '',
+            apf_import_token TEXT DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS video_jobs (
@@ -118,6 +125,8 @@ def init_db():
         );
     """)
 
+    _migrate_products_columns(conn)
+
     # Seed default config
     for key, value in DEFAULT_CONFIG.items():
         conn.execute(
@@ -126,6 +135,38 @@ def init_db():
         )
     conn.commit()
     conn.close()
+
+
+PRODUCT_ENRICHMENT_COLUMNS = [
+    ("apf_product_id", "TEXT DEFAULT ''"),
+    ("recommended_content_style", "TEXT DEFAULT ''"),
+    ("competitors", "TEXT DEFAULT '[]'"),
+    ("review_brief", "TEXT DEFAULT '{}'"),
+    ("enriched_payload", "TEXT DEFAULT '{}'"),
+    ("product_info_json", "TEXT DEFAULT ''"),
+    ("apf_import_token", "TEXT DEFAULT ''"),
+]
+
+STYLE_FROM_ANGLE = [
+    (("worth it", "hype", "waste"), "worth_it_or_waste"),
+    (("vs", "compare", "better than"), "vs_battle"),
+    (("budget", "under $", "cheapest"), "budget_challenge"),
+    (("eliminate", "rejected", "skip these"), "elimination"),
+    (("honest", "pros and cons", "red flags"), "honest_review"),
+]
+
+STYLE_ALIASES = {
+    "elimination_round": "elimination",
+    "trust_first_review": "honest_review",
+    "standard_promo": "standard",
+}
+
+
+def _migrate_products_columns(conn):
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(products)").fetchall()}
+    for name, col_def in PRODUCT_ENRICHMENT_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE products ADD COLUMN {name} {col_def}")
 
 
 init_db()
@@ -146,6 +187,307 @@ def log_activity(action: str, details: str = ""):
     )
     conn.commit()
     conn.close()
+
+
+def _json_loads(value, default=None):
+    if default is None:
+        default = {}
+    if not value:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
+def _json_dumps(value):
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _normalize_content_style(value: str) -> str:
+    raw = (value or "honest_review").strip().lower().replace(" ", "_").replace("-", "_")
+    if not raw:
+        return "honest_review"
+    return STYLE_ALIASES.get(raw, raw)
+
+
+def _infer_style_from_angles(angles):
+    text = " ".join(str(a).strip().lower() for a in (angles or []) if str(a).strip())
+    for patterns, style in STYLE_FROM_ANGLE:
+        if any(pattern in text for pattern in patterns):
+            return style
+    return "honest_review"
+
+
+def _apf_price_from_product(p: dict) -> str:
+    cart = p.get("cartValue")
+    if cart not in (None, "", 0, "0"):
+        try:
+            return f"${float(cart):.2f}"
+        except (TypeError, ValueError):
+            pass
+    return "Varies"
+
+
+def _commission_label(rate) -> str:
+    rate_text = str(rate or "").strip()
+    if not rate_text:
+        return ""
+    if "%" in rate_text:
+        return f"Affiliate commission: {rate_text}"
+    try:
+        return f"Affiliate commission: {float(rate_text):g}%"
+    except ValueError:
+        return f"Affiliate commission: {rate_text}"
+
+
+def _extract_enrichment_fields(enriched_payload: dict):
+    if not enriched_payload:
+        return "", [], {}
+    brief = enriched_payload.get("review_brief") or {}
+    if not isinstance(brief, dict):
+        brief = {}
+    angles = brief.get("best_video_angles") or []
+    style = (
+        brief.get("recommended_content_style")
+        or brief.get("recommendedContentStyle")
+        or _infer_style_from_angles(angles)
+    )
+    competitors = brief.get("suggested_competitors") or brief.get("suggestedCompetitors") or []
+    if isinstance(competitors, str):
+        competitors = [c.strip() for c in competitors.replace(";", ",").split(",") if c.strip()]
+    return _normalize_content_style(style), competitors, brief
+
+
+def _normalized_to_generate_product_info(normalized: dict) -> dict:
+    keywords = normalized.get("keywords", [])
+    if isinstance(keywords, str):
+        keywords = [k.strip() for k in keywords.split(",") if k.strip()]
+
+    key_features = normalized.get("key_features") or normalized.get("keyFeatures") or []
+    if isinstance(key_features, str):
+        key_features = [k.strip() for k in key_features.split("\n") if k.strip()]
+
+    content_style = _normalize_content_style(
+        normalized.get("content_style") or normalized.get("contentStyle") or "honest_review"
+    )
+
+    return {
+        "product_name": normalized.get("product_name") or normalized.get("productName") or "",
+        "niche": normalized.get("niche") or "General",
+        "key_features": key_features,
+        "price": normalized.get("price") or "Varies",
+        "affiliate_link": normalized.get("affiliate_link") or normalized.get("affiliateLink") or "[YOUR_AFFILIATE_LINK]",
+        "keywords": keywords if isinstance(keywords, list) else [],
+        "target_audience": normalized.get("target_audience") or normalized.get("targetAudience") or "General consumers",
+        "product_category": normalized.get("product_category") or normalized.get("niche") or "General",
+        "competitors": normalized.get("competitors") or [],
+        "unique_selling_point": normalized.get("unique_selling_point") or normalized.get("uniqueSellingPoint") or "",
+        "discount_info": normalized.get("discount_info") or normalized.get("discountInfo") or "",
+        "common_complaints": normalized.get("common_complaints") or normalized.get("commonComplaints") or "",
+        "common_praises": normalized.get("common_praises") or normalized.get("commonPraises") or "",
+        "who_not_for": normalized.get("who_not_for") or normalized.get("whoNotFor") or "",
+        "series_name": normalized.get("series_name") or normalized.get("seriesName") or "",
+        "price_comparison": normalized.get("price_comparison") or normalized.get("priceComparison") or "",
+        "content_style": content_style,
+    }
+
+
+def _local_product_info(product) -> dict:
+    brief = _json_loads(product["review_brief"], {})
+    competitors = _json_loads(product["competitors"], [])
+    positives = brief.get("positive_signals") or []
+    complaints = brief.get("common_complaints") or []
+    claims = brief.get("common_claims") or []
+    angles = brief.get("best_video_angles") or []
+
+    key_features = []
+    if claims:
+        key_features.extend(str(c).strip() for c in claims if str(c).strip())
+    description = product["description"] or ""
+    if description and not key_features:
+        key_features = [part.strip() for part in description.split(".") if part.strip()][:5]
+
+    common_complaints = ""
+    if brief.get("negative_signals") or complaints:
+        parts = []
+        if brief.get("negative_signals"):
+            parts.append("Negative signals: " + "; ".join(str(x) for x in brief["negative_signals"]))
+        if complaints:
+            parts.append("Common complaints: " + "; ".join(str(x) for x in complaints))
+        common_complaints = "\n".join(parts)
+
+    content_style = _normalize_content_style(
+        product["recommended_content_style"]
+        or brief.get("recommended_content_style")
+        or _infer_style_from_angles(angles)
+    )
+
+    return {
+        "product_name": product["name"],
+        "niche": product["category"] or "General",
+        "key_features": key_features,
+        "price": product["price"] or "Varies",
+        "affiliate_link": product["url"] or "[YOUR_AFFILIATE_LINK]",
+        "keywords": [],
+        "target_audience": brief.get("target_audience") or brief.get("who_it_may_help") or "General consumers",
+        "product_category": product["category"] or "General",
+        "competitors": competitors,
+        "unique_selling_point": (angles[0] if angles else "") or brief.get("review_summary", ""),
+        "discount_info": _commission_label(product["commission"]),
+        "common_complaints": common_complaints,
+        "common_praises": "; ".join(str(x) for x in positives) if positives else "",
+        "who_not_for": brief.get("who_should_skip_it", ""),
+        "series_name": "",
+        "price_comparison": brief.get("price_comparison") or brief.get("priceComparison") or "",
+        "content_style": content_style,
+    }
+
+
+def _service_headers(config: dict) -> dict:
+    secret = config.get("internal_service_secret", "")
+    if not secret:
+        return {}
+    return {"X-Service-Key": secret}
+
+
+def _parse_trpc_response(data: dict):
+    result = data.get("result", {}).get("data", {})
+    if isinstance(result, dict) and "json" in result:
+        return result["json"]
+    return result
+
+
+async def _apf_trpc_get(client: httpx.AsyncClient, config: dict, procedure: str, input_data: dict):
+    trpc_input = json.dumps({"json": input_data})
+    r = await client.get(
+        f"{config['apf_url']}/api/trpc/{procedure}",
+        params={"input": trpc_input},
+        headers=_service_headers(config),
+    )
+    if r.status_code != 200:
+        return None
+    return _parse_trpc_response(r.json())
+
+
+async def _fetch_apf_enriched_payload(client: httpx.AsyncClient, config: dict, apf_product_id: int) -> dict:
+    payload = await _apf_trpc_get(
+        client, config, "products.shadowCastPayload", {"productId": apf_product_id}
+    )
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _resolve_shadowcast_product_info(
+    client: httpx.AsyncClient, config: dict, product
+) -> tuple[dict, str]:
+    stored_info = _json_loads(product["product_info_json"], {})
+    if isinstance(stored_info, dict) and stored_info.get("product_name"):
+        info = _normalized_to_generate_product_info(stored_info)
+        style = _normalize_content_style(info.get("content_style") or "honest_review")
+        info["content_style"] = style
+        return info, style
+
+    enriched_payload = _json_loads(product["enriched_payload"], {})
+    if enriched_payload:
+        r = await client.post(
+            f"{config['shadowcast_url']}/api/import-apf/direct",
+            json=enriched_payload,
+            headers=_service_headers(config),
+        )
+        if r.status_code == 200:
+            body = r.json()
+            normalized = body.get("normalized") or {}
+            if normalized:
+                info = _normalized_to_generate_product_info(normalized)
+                style = _normalize_content_style(
+                    body.get("recommended_content_style") or info.get("content_style")
+                )
+                info["content_style"] = style
+                return info, style
+
+    info = _local_product_info(product)
+    style = _normalize_content_style(info.get("content_style") or "honest_review")
+    info["content_style"] = style
+    return info, style
+
+
+def _upsert_product_from_apf(
+    conn,
+    marketplace: str,
+    p: dict,
+    enriched_payload: dict,
+    recommended_style: str,
+    competitors: list,
+    review_brief: dict,
+    product_info_json: str = "",
+    apf_import_token: str = "",
+):
+    apf_id = str(p.get("id", ""))
+    existing = None
+    if apf_id:
+        existing = conn.execute(
+            "SELECT id FROM products WHERE apf_product_id = ? AND marketplace = ?",
+            (apf_id, marketplace),
+        ).fetchone()
+
+    pid = existing["id"] if existing else str(uuid.uuid4())
+    price = _apf_price_from_product(p)
+    commission = p.get("commissionRate", "")
+
+    if enriched_payload:
+        brief = enriched_payload.get("review_brief") or {}
+        if isinstance(brief, dict):
+            if brief.get("price_display"):
+                price = brief["price_display"]
+            elif brief.get("recommended_content_style"):
+                recommended_style = _normalize_content_style(brief["recommended_content_style"])
+
+    conn.execute(
+        """INSERT INTO products
+        (id, apf_product_id, name, marketplace, price, commission, gravity_score,
+         category, url, description, scraped_at, status,
+         recommended_content_style, competitors, review_brief, enriched_payload,
+         product_info_json, apf_import_token)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            apf_product_id = excluded.apf_product_id,
+            name = excluded.name,
+            price = excluded.price,
+            commission = excluded.commission,
+            gravity_score = excluded.gravity_score,
+            category = excluded.category,
+            url = excluded.url,
+            description = excluded.description,
+            scraped_at = excluded.scraped_at,
+            recommended_content_style = excluded.recommended_content_style,
+            competitors = excluded.competitors,
+            review_brief = excluded.review_brief,
+            enriched_payload = excluded.enriched_payload,
+            product_info_json = excluded.product_info_json,
+            apf_import_token = excluded.apf_import_token""",
+        (
+            pid,
+            apf_id,
+            p.get("name", "Unknown"),
+            marketplace,
+            price,
+            commission,
+            float(p.get("hiddenGemScore", 0) or 0),
+            p.get("category", ""),
+            p.get("affiliateLink", ""),
+            p.get("description", ""),
+            datetime.now().isoformat(),
+            recommended_style,
+            _json_dumps(competitors),
+            _json_dumps(review_brief),
+            _json_dumps(enriched_payload),
+            product_info_json,
+            apf_import_token,
+        ),
+    )
+    return pid
 
 
 # ── Pydantic Models ───────────────────────────────────────────────────
@@ -325,62 +667,80 @@ async def import_products_from_apf(req: ProductImport):
     """Pull products from APF scraper into Mission Control via tRPC."""
     config = get_config()
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # APF uses tRPC — call products.list procedure
-            trpc_input = json.dumps({
-                "json": {
-                    "platform": req.marketplace,
-                    "limit": req.limit,
-                    "offset": 0,
-                }
-            })
-            r = await client.get(
-                f"{config['apf_url']}/api/trpc/products.list",
-                params={"input": trpc_input},
-                headers={"X-Service-Key": config.get("internal_service_secret", "")}
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            products = await _apf_trpc_get(
+                client,
+                config,
+                "products.list",
+                {"platform": req.marketplace, "limit": req.limit, "offset": 0},
             )
-            if r.status_code == 200:
-                # tRPC wraps response in {"result": {"data": {"json": [...] }}}
-                data = r.json()
-                products = data.get("result", {}).get("data", {}).get("json", [])
-                if not products and isinstance(data.get("result", {}).get("data"), list):
-                    products = data["result"]["data"]
-                conn = get_db()
-                imported = 0
-                for p in products:
-                    pid = str(uuid.uuid4())
-                    # Map APF fields to MC schema
-                    conn.execute(
-                        """INSERT OR IGNORE INTO products
-                        (id, name, marketplace, price, commission, gravity_score,
-                         category, url, description, scraped_at, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')""",
-                        (
-                            pid,
-                            p.get("name", "Unknown"),
-                            req.marketplace,
-                            p.get("aggregateSales", ""),  # APF has no 'price' field
-                            p.get("commissionRate", ""),  # APF: commissionRate
-                            float(p.get("hiddenGemScore", 0) or 0),  # APF: hiddenGemScore
-                            p.get("category", ""),
-                            p.get("affiliateLink", ""),  # APF: affiliateLink
-                            p.get("description", ""),
-                            datetime.now().isoformat(),
-                        ),
-                    )
-                    imported += 1
-                conn.commit()
-                conn.close()
-                log_activity(
-                    "products_imported",
-                    f"{imported} products from {req.marketplace}",
+            if products is None:
+                raise HTTPException(status_code=502, detail="APF products.list request failed")
+
+            if not isinstance(products, list):
+                products = []
+
+            conn = get_db()
+            imported = 0
+            for p in products:
+                apf_id = p.get("id")
+                enriched_payload = {}
+                if apf_id is not None:
+                    try:
+                        enriched_payload = await _fetch_apf_enriched_payload(
+                            client, config, int(apf_id)
+                        )
+                    except (TypeError, ValueError):
+                        enriched_payload = {}
+
+                recommended_style, competitors, review_brief = _extract_enrichment_fields(
+                    enriched_payload
                 )
-                return {"status": "ok", "imported": imported}
-            else:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"APF returned {r.status_code}: {r.text[:200]}",
+
+                product_info_json = ""
+                apf_import_token = ""
+                if enriched_payload:
+                    try:
+                        r = await client.post(
+                            f"{config['shadowcast_url']}/api/import-apf/direct",
+                            json=enriched_payload,
+                            headers=_service_headers(config),
+                        )
+                        if r.status_code == 200:
+                            body = r.json()
+                            normalized = body.get("normalized") or {}
+                            if normalized:
+                                product_info_json = _json_dumps(
+                                    _normalized_to_generate_product_info(normalized)
+                                )
+                            apf_import_token = body.get("token") or ""
+                            if body.get("recommended_content_style"):
+                                recommended_style = _normalize_content_style(
+                                    body["recommended_content_style"]
+                                )
+                    except Exception:
+                        pass
+
+                _upsert_product_from_apf(
+                    conn,
+                    req.marketplace,
+                    p,
+                    enriched_payload,
+                    recommended_style,
+                    competitors,
+                    review_brief,
+                    product_info_json,
+                    apf_import_token,
                 )
+                imported += 1
+
+            conn.commit()
+            conn.close()
+            log_activity(
+                "products_imported",
+                f"{imported} products from {req.marketplace}",
+            )
+            return {"status": "ok", "imported": imported}
     except HTTPException:
         raise
     except Exception as e:
@@ -529,28 +889,22 @@ async def run_video_job(job_id: str):
         formats = ["short_form", "long_form"]
 
     try:
-        # Step 1: Submit job to ShadowCast /api/generate
-        # ShadowCast expects GenerateRequest with nested product_info
-        generate_payload = {
-            "product_info": {
-                "product_name": product["name"],
-                "niche": product["category"] or "General",
-                "price": product["price"] or "$49.99",
-                "affiliate_link": product["url"] or "[YOUR_AFFILIATE_LINK]",
-                "key_features": [],
-                "keywords": [],
-                "target_audience": "General consumers",
-                "product_category": product["category"] or "General",
-            },
-            "hook_types": ["curiosity"],
-            "formats": formats,
-        }
-
         async with httpx.AsyncClient(timeout=30.0) as client:
+            product_info, content_style = await _resolve_shadowcast_product_info(
+                client, config, product
+            )
+
+            generate_payload = {
+                "product_info": product_info,
+                "hook_types": ["curiosity"],
+                "formats": formats,
+                "content_style": content_style,
+            }
+
             r = await client.post(
                 f"{config['shadowcast_url']}/api/generate",
                 json=generate_payload,
-                headers={"X-Service-Key": config.get("internal_service_secret", "")}
+                headers=_service_headers(config),
             )
             if r.status_code != 200:
                 raise Exception(f"ShadowCast generation failed: {r.status_code} - {r.text[:200]}")
