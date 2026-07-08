@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../utils/api'
 import StatusBadge from '../components/StatusBadge'
-import { Video, Trash2, RefreshCw, Eye, Clock, Film } from 'lucide-react'
+import { Video, Trash2, RefreshCw, Eye, Clock, Film, Download } from 'lucide-react'
 
 interface Job {
   id: string
@@ -188,14 +188,30 @@ export default function Jobs() {
 
             {selectedJob.short_form_path && (
               <div className="mb-2 bg-brand-surface rounded-lg p-3">
-                <p className="text-xs text-brand-text-dim">Short Form Output</p>
-                <p className="text-sm font-mono truncate">{selectedJob.short_form_path}</p>
+                <p className="text-xs text-brand-text-dim mb-2">Short Form Output</p>
+                <a
+                  href={selectedJob.short_form_path}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 text-sm text-brand-accent hover:underline"
+                >
+                  <Download className="w-4 h-4" />
+                  Download short form
+                </a>
               </div>
             )}
             {selectedJob.long_form_path && (
               <div className="mb-4 bg-brand-surface rounded-lg p-3">
-                <p className="text-xs text-brand-text-dim">Long Form Output</p>
-                <p className="text-sm font-mono truncate">{selectedJob.long_form_path}</p>
+                <p className="text-xs text-brand-text-dim mb-2">Long Form Output</p>
+                <a
+                  href={selectedJob.long_form_path}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 text-sm text-brand-accent hover:underline"
+                >
+                  <Download className="w-4 h-4" />
+                  Download long form
+                </a>
               </div>
             )}
 

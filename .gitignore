@@ -37,6 +37,7 @@ node_modules/
 
 # Local secrets file
 shared env
+.service-secret
 # --- Unloved local-only / secret files ---
 !.env.example
 !.env.sample
