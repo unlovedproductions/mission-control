@@ -134,6 +134,20 @@ def init_db():
             "INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)",
             (key, value),
         )
+
+    env_secret = os.environ.get("INTERNAL_SERVICE_SECRET", "").strip()
+    if env_secret:
+        row = conn.execute(
+            "SELECT value FROM config WHERE key = 'internal_service_secret'"
+        ).fetchone()
+        current = (row[0] if row else "").strip()
+        if not current:
+            conn.execute(
+                """INSERT INTO config (key, value) VALUES ('internal_service_secret', ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+                (env_secret,),
+            )
+
     conn.commit()
     conn.close()
 
@@ -391,6 +405,37 @@ async def _fetch_apf_enriched_payload(client: httpx.AsyncClient, config: dict, a
     return payload if isinstance(payload, dict) else {}
 
 
+def _product_info_from_shadowcast_body(body: dict) -> Optional[tuple[dict, str]]:
+    normalized = body.get("normalized") or {}
+    if not normalized:
+        return None
+    info = _normalized_to_generate_product_info(normalized)
+    style = _normalize_content_style(
+        body.get("recommended_content_style") or info.get("content_style")
+    )
+    info["content_style"] = style
+    return info, style
+
+
+async def _configure_shadowcast_llm(
+    client: httpx.AsyncClient, config: dict, model: str
+) -> None:
+    r = await client.post(
+        f"{config['shadowcast_url']}/api/config",
+        json={
+            "provider": "ollama",
+            "api_key": "",
+            "base_url": config.get("ollama_url", "http://localhost:11434"),
+            "model": model,
+        },
+        headers=_service_headers(config),
+    )
+    if r.status_code != 200:
+        raise Exception(
+            f"ShadowCast LLM config failed: {r.status_code} - {r.text[:200]}"
+        )
+
+
 def _is_thin_product_info(info: dict) -> bool:
     """True when product_info lacks enrichment needed for quality videos."""
     if not isinstance(info, dict) or not info.get("product_name"):
@@ -429,6 +474,17 @@ async def _resolve_shadowcast_product_info(
             )
         return info, style
 
+    apf_import_token = product["apf_import_token"] or ""
+    if apf_import_token:
+        r = await client.get(
+            f"{config['shadowcast_url']}/api/import-apf/direct/{apf_import_token}",
+            headers=_service_headers(config),
+        )
+        if r.status_code == 200:
+            resolved = _product_info_from_shadowcast_body(r.json())
+            if resolved:
+                return resolved
+
     enriched_payload = _json_loads(product["enriched_payload"], {})
     if enriched_payload:
         try:
@@ -443,15 +499,9 @@ async def _resolve_shadowcast_product_info(
                 detail=f"ShadowCast normalize unreachable: {e}",
             )
         if r.status_code == 200:
-            body = r.json()
-            normalized = body.get("normalized") or {}
-            if normalized:
-                info = _normalized_to_generate_product_info(normalized)
-                style = _normalize_content_style(
-                    body.get("recommended_content_style") or info.get("content_style")
-                )
-                info["content_style"] = style
-                return info, style
+            resolved = _product_info_from_shadowcast_body(r.json())
+            if resolved:
+                return resolved
             raise HTTPException(
                 status_code=422,
                 detail=(
@@ -1009,13 +1059,20 @@ async def run_video_job(job_id: str):
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            product_info, content_style = await _resolve_shadowcast_product_info(
-                client, config, product, allow_thin=False
-            )
-
             job_options = _json_loads(job["job_options"] if "job_options" in job.keys() else "{}", {})
             if not isinstance(job_options, dict):
                 job_options = {}
+
+            script_model = (
+                job_options.get("script_model")
+                or job["script_model"]
+                or config.get("default_script_model", "llama3.1:8b")
+            )
+            await _configure_shadowcast_llm(client, config, script_model)
+
+            product_info, content_style = await _resolve_shadowcast_product_info(
+                client, config, product, allow_thin=False
+            )
 
             hook_types = job_options.get("hook_types") or ["curiosity"]
             if isinstance(hook_types, str):

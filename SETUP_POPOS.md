@@ -155,30 +155,24 @@ cd APF
 npm install
 
 # Create .env file
-cat > .env << 'EOF'
+SECRET="$(openssl rand -hex 32)"
+cat > .env << EOF
 DATABASE_URL=mysql://root:unloveddev@localhost:3306/apf
 PORT=3000
 NODE_ENV=development
+INTERNAL_SERVICE_SECRET=${SECRET}
 EOF
 ```
 
-**Important:** APF uses Manus OAuth for authentication. For local development without OAuth, you have two options:
+**Mission Control auth (recommended):** APF accepts `X-Service-Key` when it matches `INTERNAL_SERVICE_SECRET`. Use the same value in ShadowCast and Mission Control so MC can call APF tRPC without Manus OAuth.
 
-**Option A — Run in dev mode (recommended for testing with MC):**
 ```bash
-npm run dev
-```
-The server starts on port 3000. The `/api/health` endpoint works without auth. Product endpoints require auth via the tRPC session cookie.
-
-**Option B — If you need to bypass auth for local MC integration:**
-Add this to `server/_core/trpc.ts` temporarily:
-
-```typescript
-// Add after the existing protectedProcedure export
-export const localProcedure = t.procedure; // No auth required
+# Copy the secret from APF .env into ShadowCast and Mission Control:
+grep INTERNAL_SERVICE_SECRET ~/APF/.env
+export INTERNAL_SERVICE_SECRET="<same value>"
 ```
 
-Then in `server/routers.ts`, create a local products endpoint that uses `localProcedure` instead of `protectedProcedure`.
+Set it in Mission Control via Settings → **Internal Service Secret**, or export `INTERNAL_SERVICE_SECRET` before starting the MC backend.
 
 **Push the database schema:**
 ```bash
@@ -216,13 +210,17 @@ sudo apt install -y ffmpeg libsm6 libxext6 libgl1-mesa-glx
 sudo apt install -y fonts-inter fonts-roboto
 ```
 
-**Configure Ollama as LLM provider:**
+**Configure Ollama + shared service secret:**
 
-ShadowCast auto-detects Ollama at `http://localhost:11434`. To verify or change, start the app and use the `/api/config` endpoint or the frontend settings.
+ShadowCast auto-detects Ollama at `http://localhost:11434`. Export the same `INTERNAL_SERVICE_SECRET` used by APF before starting:
+
+```bash
+export INTERNAL_SERVICE_SECRET="<same value as APF .env>"
+```
 
 **Start ShadowCast:**
 ```bash
-cd ~/projects/shadowcast/backend
+cd ~/shadowcast-/backend
 source venv/bin/activate
 python3 app.py
 # Runs on http://localhost:8000
@@ -251,10 +249,11 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 # Start backend (in one terminal)
+export INTERNAL_SERVICE_SECRET="<same value as APF .env>"
 uvicorn main:app --host 0.0.0.0 --port 8100 --reload
 
 # Frontend setup (in another terminal)
-cd ~/projects/mission-control/frontend
+cd ~/mission-control/frontend
 npm install
 npm run dev
 # Runs on http://localhost:3100
@@ -286,6 +285,12 @@ Once all three apps + Ollama are running, Mission Control auto-detects them at t
 
 If any service runs on a different port, update it in Mission Control's Settings page (http://localhost:3100/settings).
 
+**Shared secret checklist:**
+1. `INTERNAL_SERVICE_SECRET` in `~/APF/.env`
+2. Exported when starting ShadowCast
+3. Set in MC Settings or exported before starting MC backend
+4. All three values must match exactly
+
 **Data Flow:**
 1. APF scrapes affiliate products from marketplaces
 2. Mission Control imports products from APF via tRPC
@@ -298,67 +303,23 @@ If any service runs on a different port, update it in Mission Control's Settings
 
 ## 9. Startup Script (One Command)
 
-Create a startup script to launch everything:
+From the mission-control repo:
 
 ```bash
-cat > ~/start-ecosystem.sh << 'EOF'
-#!/bin/bash
-echo "🚀 Starting Unloved Productions Ecosystem..."
-
-# Start MySQL (if not already running)
-docker start apf-mysql 2>/dev/null || echo "MySQL already running"
-
-# Start Ollama (if not already running)
-pgrep -x ollama > /dev/null || (ollama serve &)
-sleep 2
-
-# Start APF
-echo "Starting APF..."
-cd ~/projects/APF
-npm run dev &
-APF_PID=$!
-
-# Start ShadowCast
-echo "Starting ShadowCast..."
-cd ~/projects/shadowcast/backend
-source venv/bin/activate
-python3 app.py &
-SC_PID=$!
-
-# Start Mission Control Backend
-echo "Starting Mission Control Backend..."
-cd ~/projects/mission-control/backend
-source venv/bin/activate
-uvicorn main:app --host 0.0.0.0 --port 8100 &
-MC_PID=$!
-
-# Start Mission Control Frontend
-echo "Starting Mission Control Frontend..."
-cd ~/projects/mission-control/frontend
-npm run dev &
-FE_PID=$!
-
-sleep 5
-echo ""
-echo "✅ Ecosystem is running!"
-echo "   Mission Control: http://localhost:3100"
-echo "   ShadowCast:      http://localhost:8000"
-echo "   APF:             http://localhost:3000"
-echo "   Ollama:          http://localhost:11434"
-echo ""
-echo "Press Ctrl+C to stop all services"
-
-# Wait and cleanup on exit
-trap "kill $APF_PID $SC_PID $MC_PID $FE_PID 2>/dev/null; echo 'Stopped.'" EXIT
-wait
-EOF
-
-chmod +x ~/start-ecosystem.sh
+chmod +x ~/mission-control/scripts/start-ecosystem.sh
+~/mission-control/scripts/start-ecosystem.sh
 ```
 
-**Usage:**
+The script uses `~/APF`, `~/shadowcast-`, and `~/mission-control` by default. Override with `APF_HOME`, `SC_HOME`, or `MC_HOME` if your clones live elsewhere.
+
+It generates `~/mission-control/.service-secret` on first run and exports `INTERNAL_SERVICE_SECRET` to APF, ShadowCast, and MC.
+
+**Manual smoke test after startup:**
 ```bash
-~/start-ecosystem.sh
+curl http://localhost:8100/api/status/services
+curl -X POST http://localhost:8100/api/products/import \
+  -H 'Content-Type: application/json' \
+  -d '{"marketplace":"clickbank","limit":5}'
 ```
 
 ---
@@ -375,7 +336,7 @@ chmod +x ~/start-ecosystem.sh
 | ShadowCast import errors | Make sure venv is activated and all deps installed. Check `moviepy>=2.0` specifically |
 | ShadowCast "No module named moviepy" | `pip install moviepy>=2.0.0` (must be v2, not v1) |
 | MC shows services "offline" | Verify each service is running with curl to their /api/health |
-| MC product import fails | APF auth issue — see Section 5 Option B for local bypass |
+| MC product import fails | APF auth — verify `INTERNAL_SERVICE_SECRET` matches in APF, ShadowCast, and MC Settings |
 | Video job stuck at "rendering" | Check ShadowCast terminal for errors. May be VRAM issue if model + render compete |
 | Ollama model won't load | Check VRAM: `nvidia-smi`. Unload other models: `ollama stop <model>` |
 | Port conflicts | Use `ss -tlnp | grep <port>` to find what's using it |
@@ -402,4 +363,4 @@ curl http://localhost:11434/api/ps
 - **Pop!_OS vs Ubuntu:** Pop!_OS is based on Ubuntu 22.04 so all Ubuntu instructions apply. The main difference is Pop!_OS has better NVIDIA driver support out of the box (especially with the NVIDIA ISO).
 - **VRAM Management:** When ShadowCast is rendering video AND Ollama has a model loaded, you may hit VRAM limits. ShadowCast's video rendering uses GPU for some operations. If you get CUDA OOM errors during render, stop the Ollama model first: `ollama stop llama3.1:8b`.
 - **First Run:** On first launch, Mission Control creates its SQLite database automatically. No setup needed.
-- **APF Auth:** The tRPC product endpoints require authentication. For pure local dev, the simplest path is to manually add products to APF's frontend first, then import them into MC. Or implement the auth bypass in Section 5.
+- **APF Auth:** Use a shared `INTERNAL_SERVICE_SECRET` across APF, ShadowCast, and Mission Control. APF accepts `X-Service-Key` for machine-to-machine calls.

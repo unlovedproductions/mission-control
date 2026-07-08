@@ -143,9 +143,19 @@ The backend exposes a REST API on port 8100:
 | Script Model | `llama3.1:8b` |
 | Analysis Model | `llama3.1:8b` |
 | Creative Model | `mistral:7b-instruct` |
-| Heavy Model | `qwen2.5:14b-instruct-q5_K_M` |
+| Heavy Model | `mixtral:8x7b-instruct-v0.1-q4_K_M` |
 
 All settings are configurable from the dashboard Settings page.
+
+## Service Authentication
+
+Mission Control talks to APF and ShadowCast with `X-Service-Key` when **Internal Service Secret** is set. Use the same value everywhere:
+
+1. `INTERNAL_SERVICE_SECRET` in `~/APF/.env`
+2. Export before starting ShadowCast and MC backend
+3. Or set in MC Settings (seeded from `INTERNAL_SERVICE_SECRET` env on backend start)
+
+Quick bring-up: `chmod +x scripts/start-ecosystem.sh && ./scripts/start-ecosystem.sh`
 
 ## Project Structure
 
@@ -155,6 +165,8 @@ mission-control/
 │   ├── main.py              # FastAPI orchestration server
 │   ├── requirements.txt     # Python dependencies
 │   └── mission_control.db   # SQLite database (auto-created)
+├── scripts/
+│   └── start-ecosystem.sh   # Local bring-up for APF + ShadowCast + MC
 ├── frontend/
 │   ├── src/
 │   │   ├── components/      # Reusable UI components
