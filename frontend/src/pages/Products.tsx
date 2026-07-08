@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../utils/api'
 import StatusBadge from '../components/StatusBadge'
 import {
-  Package, Search, Download, Brain, Video, Filter, RefreshCw, ExternalLink, ChevronDown,
+  Package, Search, Download, Brain, Video, RefreshCw, ExternalLink,
 } from 'lucide-react'
 
 interface Product {
@@ -18,9 +18,35 @@ interface Product {
   status: string
   ai_analysis: string
   created_at: string
+  recommended_content_style?: string
+  product_info_json?: string
+  enriched_payload?: string
 }
 
 const MARKETPLACES = ['warriorplus', 'digistore24', 'clickbank', 'shareasale']
+
+const HOOK_OPTIONS = [
+  { id: 'curiosity', label: 'Curiosity' },
+  { id: 'problem_agitation', label: 'Problem-Agitation' },
+  { id: 'listicle', label: 'Listicle' },
+  { id: 'urgency', label: 'Urgency' },
+  { id: 'contrarian', label: 'Contrarian' },
+  { id: 'data_bomb', label: 'Data Bomb' },
+  { id: 'confession', label: 'Confession' },
+  { id: 'comparison_trap', label: 'Comparison Trap' },
+  { id: 'myth_buster', label: 'Myth Buster' },
+]
+
+const CONTENT_STYLES = [
+  'honest_review',
+  'elimination',
+  'worth_it_or_waste',
+  'budget_challenge',
+  'vs_battle',
+  'standard',
+]
+
+const AUDIO_MOODS = ['auto', 'chill', 'energetic', 'dramatic', 'minimal']
 
 export default function Products() {
   const [products, setProducts] = useState<Product[]>([])
@@ -33,6 +59,14 @@ export default function Products() {
   const [searchQuery, setSearchQuery] = useState('')
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
   const [importMarketplace, setImportMarketplace] = useState('clickbank')
+  const [jobModalProduct, setJobModalProduct] = useState<Product | null>(null)
+  const [jobType, setJobType] = useState('both')
+  const [hookTypes, setHookTypes] = useState<string[]>(['curiosity'])
+  const [contentStyle, setContentStyle] = useState('')
+  const [audioEnabled, setAudioEnabled] = useState(true)
+  const [audioMood, setAudioMood] = useState('auto')
+  const [useTts, setUseTts] = useState(false)
+  const [creatingJob, setCreatingJob] = useState(false)
 
   const fetchProducts = async () => {
     setLoading(true)
@@ -78,12 +112,44 @@ export default function Products() {
     }
   }
 
-  const handleCreateJob = async (product: Product) => {
+  const openJobModal = (product: Product) => {
+    setJobModalProduct(product)
+    setJobType('both')
+    setHookTypes(['curiosity'])
+    setContentStyle(product.recommended_content_style || '')
+    setAudioEnabled(true)
+    setAudioMood('auto')
+    setUseTts(false)
+  }
+
+  const toggleHook = (id: string) => {
+    setHookTypes((prev) => {
+      if (prev.includes(id)) {
+        const next = prev.filter((h) => h !== id)
+        return next.length ? next : prev
+      }
+      return [...prev, id]
+    })
+  }
+
+  const handleCreateJob = async () => {
+    if (!jobModalProduct) return
+    setCreatingJob(true)
     try {
-      await api.createJob(product.id, 'both')
-      alert(`Video job queued for "${product.name}"`)
+      await api.createJob(jobModalProduct.id, jobType, undefined, {
+        hook_types: hookTypes,
+        content_style: contentStyle || undefined,
+        audio_enabled: audioEnabled,
+        audio_mood: audioMood,
+        use_tts: useTts,
+        tts_provider: 'auto',
+      })
+      alert(`Video job queued for "${jobModalProduct.name}"`)
+      setJobModalProduct(null)
     } catch (e: any) {
       alert(`Failed to create job: ${e.message}`)
+    } finally {
+      setCreatingJob(false)
     }
   }
 
@@ -115,7 +181,6 @@ export default function Products() {
         </div>
       </div>
 
-      {/* Filters */}
       <div className="flex items-center gap-3 flex-wrap">
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-text-dim" />
@@ -145,7 +210,6 @@ export default function Products() {
         </button>
       </div>
 
-      {/* Product Table */}
       <div className="card p-0 overflow-hidden">
         <table className="w-full">
           <thead>
@@ -209,7 +273,7 @@ export default function Products() {
                         )}
                       </button>
                       <button
-                        onClick={() => handleCreateJob(product)}
+                        onClick={() => openJobModal(product)}
                         className="p-1.5 rounded-lg hover:bg-brand-card text-brand-text-dim hover:text-brand-success transition-colors"
                         title="Create video job"
                       >
@@ -235,12 +299,10 @@ export default function Products() {
         </table>
       </div>
 
-      {/* Total Count */}
       <p className="text-xs text-brand-text-dim">
         Showing {filtered.length} of {total} products
       </p>
 
-      {/* Product Detail Modal */}
       {selectedProduct && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setSelectedProduct(null)}>
           <div className="bg-brand-card border border-brand-border rounded-xl max-w-2xl w-full max-h-[80vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
@@ -290,10 +352,90 @@ export default function Products() {
                 {analyzing === selectedProduct.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Brain className="w-4 h-4" />}
                 {analyzing === selectedProduct.id ? 'Analyzing...' : 'Analyze'}
               </button>
-              <button onClick={() => { handleCreateJob(selectedProduct); }} className="btn-primary flex items-center gap-2">
+              <button onClick={() => { openJobModal(selectedProduct); }} className="btn-primary flex items-center gap-2">
                 <Video className="w-4 h-4" /> Create Video Job
               </button>
               <button onClick={() => setSelectedProduct(null)} className="btn-secondary ml-auto">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {jobModalProduct && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setJobModalProduct(null)}>
+          <div className="bg-brand-card border border-brand-border rounded-xl max-w-lg w-full max-h-[85vh] overflow-y-auto p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+            <div>
+              <h2 className="text-lg font-bold">Create Video Job</h2>
+              <p className="text-sm text-brand-text-dim mt-1">{jobModalProduct.name}</p>
+            </div>
+
+            <div>
+              <label className="text-xs text-brand-text-dim uppercase tracking-wider">Format</label>
+              <select className="input-field w-full mt-1" value={jobType} onChange={(e) => setJobType(e.target.value)}>
+                <option value="both">Short + Long</option>
+                <option value="short">Short only</option>
+                <option value="long">Long only</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs text-brand-text-dim uppercase tracking-wider">Content style</label>
+              <select className="input-field w-full mt-1" value={contentStyle} onChange={(e) => setContentStyle(e.target.value)}>
+                <option value="">Use product recommendation</option>
+                {CONTENT_STYLES.map((s) => (
+                  <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs text-brand-text-dim uppercase tracking-wider mb-2 block">Hooks</label>
+              <div className="flex flex-wrap gap-2">
+                {HOOK_OPTIONS.map((h) => (
+                  <button
+                    key={h.id}
+                    type="button"
+                    onClick={() => toggleHook(h.id)}
+                    className={`text-xs px-2 py-1 rounded border ${
+                      hookTypes.includes(h.id)
+                        ? 'border-brand-accent text-brand-accent bg-brand-accent/10'
+                        : 'border-brand-border text-brand-text-dim'
+                    }`}
+                  >
+                    {h.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-4 flex-wrap">
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={audioEnabled} onChange={(e) => setAudioEnabled(e.target.checked)} />
+                Music & SFX
+              </label>
+              <label className="flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={useTts} onChange={(e) => setUseTts(e.target.checked)} />
+                Voiceover (TTS)
+              </label>
+            </div>
+
+            {audioEnabled && (
+              <div>
+                <label className="text-xs text-brand-text-dim uppercase tracking-wider">Music mood</label>
+                <select className="input-field w-full mt-1" value={audioMood} onChange={(e) => setAudioMood(e.target.value)}>
+                  {AUDIO_MOODS.map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="flex items-center gap-3 pt-2 border-t border-brand-border">
+              <button onClick={handleCreateJob} disabled={creatingJob} className="btn-primary flex items-center gap-2">
+                {creatingJob ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Video className="w-4 h-4" />}
+                {creatingJob ? 'Queuing...' : 'Queue Job'}
+              </button>
+              <button onClick={() => setJobModalProduct(null)} className="btn-secondary ml-auto">Cancel</button>
             </div>
           </div>
         </div>

@@ -120,12 +120,13 @@ export default function SettingsPage() {
           onClick={async () => {
             if (!confirm('Reset all settings to defaults?')) return
             const defaults: Record<string, string> = {
-              shadowcast_url: 'http://localhost:5000',
-              apf_url: 'http://localhost:3001',
+              shadowcast_url: 'http://localhost:8000',
+              apf_url: 'http://localhost:3000',
               ollama_url: 'http://localhost:11434',
-              default_script_model: 'llama3:8b',
-              default_analysis_model: 'llama3:8b',
-              default_creative_model: 'mistral:7b',
+              internal_service_secret: '',
+              default_script_model: 'llama3.1:8b',
+              default_analysis_model: 'llama3.1:8b',
+              default_creative_model: 'mistral:7b-instruct',
               heavy_reasoning_model: 'mixtral:8x7b-instruct-v0.1-q4_K_M',
             }
             for (const [key, value] of Object.entries(defaults)) {
