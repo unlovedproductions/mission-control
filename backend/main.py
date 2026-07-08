@@ -126,6 +126,7 @@ def init_db():
     """)
 
     _migrate_products_columns(conn)
+    _migrate_video_jobs_columns(conn)
 
     # Seed default config
     for key, value in DEFAULT_CONFIG.items():
@@ -145,6 +146,10 @@ PRODUCT_ENRICHMENT_COLUMNS = [
     ("enriched_payload", "TEXT DEFAULT '{}'"),
     ("product_info_json", "TEXT DEFAULT ''"),
     ("apf_import_token", "TEXT DEFAULT ''"),
+]
+
+VIDEO_JOB_OPTION_COLUMNS = [
+    ("job_options", "TEXT DEFAULT '{}'"),
 ]
 
 STYLE_FROM_ANGLE = [
@@ -167,6 +172,13 @@ def _migrate_products_columns(conn):
     for name, col_def in PRODUCT_ENRICHMENT_COLUMNS:
         if name not in existing:
             conn.execute(f"ALTER TABLE products ADD COLUMN {name} {col_def}")
+
+
+def _migrate_video_jobs_columns(conn):
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(video_jobs)").fetchall()}
+    for name, col_def in VIDEO_JOB_OPTION_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE video_jobs ADD COLUMN {name} {col_def}")
 
 
 init_db()
@@ -379,23 +391,57 @@ async def _fetch_apf_enriched_payload(client: httpx.AsyncClient, config: dict, a
     return payload if isinstance(payload, dict) else {}
 
 
+def _is_thin_product_info(info: dict) -> bool:
+    """True when product_info lacks enrichment needed for quality videos."""
+    if not isinstance(info, dict) or not info.get("product_name"):
+        return True
+    features = info.get("key_features") or []
+    if isinstance(features, str):
+        features = [f for f in features.split(",") if f.strip()]
+    has_features = len(features) > 0
+    has_competitors = bool(info.get("competitors"))
+    has_depth = bool(
+        info.get("common_complaints")
+        or info.get("common_praises")
+        or info.get("unique_selling_point")
+        or info.get("price_comparison")
+        or info.get("who_not_for")
+    )
+    # Thin if no features and no enrichment depth (local stub / failed normalize)
+    return not has_features and not has_depth and not has_competitors
+
+
 async def _resolve_shadowcast_product_info(
-    client: httpx.AsyncClient, config: dict, product
+    client: httpx.AsyncClient, config: dict, product, *, allow_thin: bool = False
 ) -> tuple[dict, str]:
     stored_info = _json_loads(product["product_info_json"], {})
     if isinstance(stored_info, dict) and stored_info.get("product_name"):
         info = _normalized_to_generate_product_info(stored_info)
         style = _normalize_content_style(info.get("content_style") or "honest_review")
         info["content_style"] = style
+        if not allow_thin and _is_thin_product_info(info):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Product '{product['name']}' has thin product_info. "
+                    "Re-import from APF after enrichment completes."
+                ),
+            )
         return info, style
 
     enriched_payload = _json_loads(product["enriched_payload"], {})
     if enriched_payload:
-        r = await client.post(
-            f"{config['shadowcast_url']}/api/import-apf/direct",
-            json=enriched_payload,
-            headers=_service_headers(config),
-        )
+        try:
+            r = await client.post(
+                f"{config['shadowcast_url']}/api/import-apf/direct",
+                json=enriched_payload,
+                headers=_service_headers(config),
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"ShadowCast normalize unreachable: {e}",
+            )
         if r.status_code == 200:
             body = r.json()
             normalized = body.get("normalized") or {}
@@ -406,6 +452,26 @@ async def _resolve_shadowcast_product_info(
                 )
                 info["content_style"] = style
                 return info, style
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"ShadowCast returned empty normalized payload for '{product['name']}'. "
+                    "Check APF enrichment."
+                ),
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=f"ShadowCast normalize failed ({r.status_code}): {r.text[:200]}",
+        )
+
+    if not allow_thin:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Product '{product['name']}' has no enriched APF payload. "
+                "Import from APF after review enrichment completes; refusing thin stub."
+            ),
+        )
 
     info = _local_product_info(product)
     style = _normalize_content_style(info.get("content_style") or "honest_review")
@@ -505,6 +571,13 @@ class VideoJobCreate(BaseModel):
     product_id: str
     job_type: str = "both"  # "short", "long", "both"
     script_model: Optional[str] = None
+    hook_types: Optional[List[str]] = None
+    content_style: Optional[str] = None
+    audio_enabled: bool = True
+    audio_mood: str = "auto"
+    use_tts: bool = False
+    tts_provider: str = "auto"
+    tts_voice: Optional[str] = None
 
 
 class CalendarEventCreate(BaseModel):
@@ -699,6 +772,7 @@ async def import_products_from_apf(req: ProductImport):
 
                 product_info_json = ""
                 apf_import_token = ""
+                normalize_warning = None
                 if enriched_payload:
                     try:
                         r = await client.post(
@@ -713,13 +787,23 @@ async def import_products_from_apf(req: ProductImport):
                                 product_info_json = _json_dumps(
                                     _normalized_to_generate_product_info(normalized)
                                 )
+                            else:
+                                normalize_warning = "empty normalized payload"
                             apf_import_token = body.get("token") or ""
                             if body.get("recommended_content_style"):
                                 recommended_style = _normalize_content_style(
                                     body["recommended_content_style"]
                                 )
-                    except Exception:
-                        pass
+                        else:
+                            normalize_warning = f"HTTP {r.status_code}: {r.text[:120]}"
+                    except Exception as e:
+                        normalize_warning = str(e)
+
+                if normalize_warning:
+                    log_activity(
+                        "apf_normalize_failed",
+                        f"{p.get('name', apf_id)}: {normalize_warning}",
+                    )
 
                 _upsert_product_from_apf(
                     conn,
@@ -836,15 +920,50 @@ async def create_video_job(req: VideoJobCreate, background_tasks: BackgroundTask
         conn.close()
         raise HTTPException(status_code=404, detail="Product not found")
 
+    # Refuse jobs when enrichment is missing (no product_info and no enriched payload)
+    stored_info = _json_loads(product["product_info_json"], {})
+    enriched_payload = _json_loads(product["enriched_payload"], {})
+    if not (isinstance(stored_info, dict) and stored_info.get("product_name")) and not enriched_payload:
+        conn.close()
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Product '{product['name']}' has no enriched APF payload. "
+                "Re-import from APF after enrichment; refusing thin stub job."
+            ),
+        )
+    if isinstance(stored_info, dict) and stored_info.get("product_name"):
+        preview = _normalized_to_generate_product_info(stored_info)
+        if _is_thin_product_info(preview) and not enriched_payload:
+            conn.close()
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Product '{product['name']}' product_info is too thin for video generation. "
+                    "Re-import from APF after enrichment."
+                ),
+            )
+
     config = get_config()
     job_id = str(uuid.uuid4())
     model = req.script_model or config.get("default_script_model", "llama3.1:8b")
 
+    job_options = {
+        "hook_types": req.hook_types or ["curiosity"],
+        "content_style": req.content_style,
+        "audio_enabled": req.audio_enabled,
+        "audio_mood": req.audio_mood or "auto",
+        "use_tts": req.use_tts,
+        "tts_provider": req.tts_provider or "auto",
+        "tts_voice": req.tts_voice,
+        "script_model": model,
+    }
+
     conn.execute(
         """INSERT INTO video_jobs
-        (id, product_id, product_name, status, job_type, script_model)
-        VALUES (?, ?, ?, 'queued', ?, ?)""",
-        (job_id, req.product_id, product["name"], req.job_type, model),
+        (id, product_id, product_name, status, job_type, script_model, job_options)
+        VALUES (?, ?, ?, 'queued', ?, ?, ?)""",
+        (job_id, req.product_id, product["name"], req.job_type, model, _json_dumps(job_options)),
     )
     conn.commit()
     conn.close()
@@ -854,7 +973,7 @@ async def create_video_job(req: VideoJobCreate, background_tasks: BackgroundTask
     # Run the job in background
     background_tasks.add_task(run_video_job, job_id)
 
-    return {"status": "queued", "job_id": job_id}
+    return {"status": "queued", "job_id": job_id, "options": job_options}
 
 
 async def run_video_job(job_id: str):
@@ -891,14 +1010,31 @@ async def run_video_job(job_id: str):
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             product_info, content_style = await _resolve_shadowcast_product_info(
-                client, config, product
+                client, config, product, allow_thin=False
             )
+
+            job_options = _json_loads(job["job_options"] if "job_options" in job.keys() else "{}", {})
+            if not isinstance(job_options, dict):
+                job_options = {}
+
+            hook_types = job_options.get("hook_types") or ["curiosity"]
+            if isinstance(hook_types, str):
+                hook_types = [h.strip() for h in hook_types.split(",") if h.strip()]
+            override_style = job_options.get("content_style")
+            if override_style:
+                content_style = _normalize_content_style(override_style)
+                product_info["content_style"] = content_style
 
             generate_payload = {
                 "product_info": product_info,
-                "hook_types": ["curiosity"],
+                "hook_types": hook_types,
                 "formats": formats,
                 "content_style": content_style,
+                "audio_enabled": bool(job_options.get("audio_enabled", True)),
+                "audio_mood": job_options.get("audio_mood") or "auto",
+                "use_tts": bool(job_options.get("use_tts", False)),
+                "tts_provider": job_options.get("tts_provider") or "auto",
+                "tts_voice": job_options.get("tts_voice"),
             }
 
             r = await client.post(
@@ -968,6 +1104,14 @@ async def run_video_job(job_id: str):
         # If we get here, polling timed out
         raise Exception("ShadowCast job timed out after 30 minutes")
 
+    except HTTPException as e:
+        detail = e.detail if isinstance(e.detail, str) else str(e.detail)
+        conn.execute(
+            "UPDATE video_jobs SET status = 'failed', error_message = ? WHERE id = ?",
+            (detail, job_id),
+        )
+        conn.commit()
+        log_activity("job_failed", f"Job {job_id}: {detail}")
     except Exception as e:
         conn.execute(
             "UPDATE video_jobs SET status = 'failed', error_message = ? WHERE id = ?",

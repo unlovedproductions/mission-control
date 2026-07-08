@@ -48,10 +48,28 @@ export const api = {
     const qs = status ? `?status=${encodeURIComponent(status)}` : '';
     return request<any>(`/jobs${qs}`);
   },
-  createJob: (productId: string, jobType: string = 'both', scriptModel?: string) =>
+  createJob: (
+    productId: string,
+    jobType: string = 'both',
+    scriptModel?: string,
+    options?: {
+      hook_types?: string[];
+      content_style?: string;
+      audio_enabled?: boolean;
+      audio_mood?: string;
+      use_tts?: boolean;
+      tts_provider?: string;
+      tts_voice?: string | null;
+    },
+  ) =>
     request<any>('/jobs', {
       method: 'POST',
-      body: JSON.stringify({ product_id: productId, job_type: jobType, script_model: scriptModel }),
+      body: JSON.stringify({
+        product_id: productId,
+        job_type: jobType,
+        script_model: scriptModel,
+        ...(options || {}),
+      }),
     }),
   getJob: (id: string) => request<any>(`/jobs/${id}`),
   deleteJob: (id: string) => request<any>(`/jobs/${id}`, { method: 'DELETE' }),
