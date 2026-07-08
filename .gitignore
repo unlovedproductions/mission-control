@@ -6,3 +6,68 @@ __pycache__/
 *.pyc
 venv/
 .env
+
+# Local environment
+backend/.env
+backend/.env.*
+.env
+.env.*
+
+# Python
+backend/venv/
+backend/.venv/
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+frontend/node_modules/
+node_modules/
+.pnpm-store/
+
+# Local backups/runtime
+*.backup.*
+*.log
+
+# Local secrets file
+shared env
+# --- Unloved local-only / secret files ---
+!.env.example
+!.env.sample
+*.local
+*.secret
+secrets/
+credentials/
+*.pem
+*.key
+*.crt
+id_rsa
+id_ed25519
+# --- Dependencies / build outputs ---
+.next/
+build/
+.turbo/
+.cache/
+.parcel-cache/
+# --- Python local files ---
+# --- Databases / generated local runtime data ---
+*.sqlite
+*.sqlite3
+*.db-*
+outputs/
+exports/
+uploads/
+downloads/
+apf_imports/
+logs/
+# --- OS/editor ---
+.DS_Store
+.idea/
+.vscode/
+*~
