@@ -202,6 +202,16 @@ def _migrate_video_jobs_columns(conn):
             conn.execute(f"ALTER TABLE video_jobs ADD COLUMN {name} {col_def}")
 
 
+def _recover_stuck_jobs(conn):
+    conn.execute(
+        """UPDATE video_jobs SET status = 'failed',
+           error_message = 'Interrupted — server restarted while job was active'
+           WHERE status IN ('generating_script', 'rendering')
+           AND started_at != ''
+           AND datetime(started_at) < datetime('now', '-35 minutes')"""
+    )
+
+
 init_db()
 
 
@@ -221,16 +231,6 @@ def get_public_config() -> dict:
         else:
             out[key] = value
     return out
-
-
-def _recover_stuck_jobs(conn):
-    conn.execute(
-        """UPDATE video_jobs SET status = 'failed',
-           error_message = 'Interrupted — server restarted while job was active'
-           WHERE status IN ('generating_script', 'rendering')
-           AND started_at != ''
-           AND datetime(started_at) < datetime('now', '-35 minutes')"""
-    )
 
 
 def log_activity(action: str, details: str = ""):
