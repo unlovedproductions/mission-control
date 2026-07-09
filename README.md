@@ -124,10 +124,17 @@ The backend exposes a REST API on port 8100:
 | `/api/ollama/models` | GET | List installed Ollama models |
 | `/api/ollama/pull` | POST | Pull a new model |
 | `/api/ollama/running` | GET | Currently loaded models |
-| `/api/products` | GET | List imported products |
-| `/api/products/import` | POST | Import from APF |
+| `/api/products` | GET | List imported products (filtered total) |
+| `/api/products/import` | POST | Import from APF (upsert by APF id) |
+| `/api/products/refresh` | POST | Trigger APF marketplace scrape |
+| `/api/products/search` | GET | Search APF products |
+| `/api/products/{id}/reenrich` | POST | Re-fetch APF enrichment + ShadowCast normalize |
 | `/api/products/{id}/analyze` | POST | AI-analyze a product |
-| `/api/jobs` | GET/POST | List/create video jobs |
+| `/api/products/{id}/status` | PUT | Approve/reject product |
+| `/api/apf/credentials` | GET/PUT | Marketplace API key status / save |
+| `/api/shadowcast/hooks` | GET | ShadowCast hook types |
+| `/api/shadowcast/content-styles` | GET | ShadowCast content styles |
+| `/api/jobs` | GET/POST | List/create video jobs (hooks, style, model) |
 | `/api/jobs/{id}` | GET/DELETE | Get/delete a job |
 | `/api/calendar` | GET/POST | List/create calendar events |
 | `/api/analytics/overview` | GET | Dashboard statistics |
@@ -144,8 +151,20 @@ The backend exposes a REST API on port 8100:
 | Analysis Model | `llama3.1:8b` |
 | Creative Model | `mistral:7b-instruct` |
 | Heavy Model | `mixtral:8x7b-instruct-v0.1-q4_K_M` |
+| Default Hooks | `curiosity` |
+| Default Content Style | `honest_review` |
 
-All settings are configurable from the dashboard Settings page.
+## Operator Workflow
+
+1. **Scrape APF** — Product Pipeline → Scrape APF (per marketplace)
+2. **Import** — pulls `products.list` + `shadowCastPayload`, normalizes via ShadowCast
+3. **Review** — open product detail, check review brief + recommended style
+4. **Approve** — mark product approved before queuing video
+5. **Create job** — pick hooks, style, model; MC sets ShadowCast LLM config then `/api/generate`
+6. **Track** — Video Queue shows progress; download when complete
+7. **Schedule** — completed jobs → Add to Calendar
+
+APF service-key auth uses `APF_USER_ID` (default `1`) so `products.list` returns scraped products.
 
 ## Service Authentication
 

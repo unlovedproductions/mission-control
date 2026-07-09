@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { api } from '../utils/api'
 import StatusBadge from '../components/StatusBadge'
 import {
-  Package, Search, Download, Brain, Video, RefreshCw, ExternalLink,
+  Package, Search, Download, Brain, Video, RefreshCw, ExternalLink, CloudDownload, Check, X,
 } from 'lucide-react'
 
 interface Product {
@@ -21,6 +21,7 @@ interface Product {
   recommended_content_style?: string
   product_info_json?: string
   enriched_payload?: string
+  review_brief?: string
 }
 
 const MARKETPLACES = ['warriorplus', 'digistore24', 'clickbank', 'shareasale']
@@ -38,21 +39,27 @@ const HOOK_OPTIONS = [
 ]
 
 const CONTENT_STYLES = [
-  'honest_review',
-  'elimination',
-  'worth_it_or_waste',
-  'budget_challenge',
-  'vs_battle',
-  'standard',
+  'honest_review', 'elimination', 'worth_it_or_waste', 'budget_challenge', 'vs_battle', 'standard',
 ]
 
 const AUDIO_MOODS = ['auto', 'chill', 'energetic', 'dramatic', 'minimal']
+
+function parseBrief(product: Product): Record<string, any> {
+  if (!product.review_brief) return {}
+  try {
+    return typeof product.review_brief === 'string' ? JSON.parse(product.review_brief) : product.review_brief
+  } catch {
+    return {}
+  }
+}
 
 export default function Products() {
   const [products, setProducts] = useState<Product[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [importing, setImporting] = useState(false)
+  const [scraping, setScraping] = useState(false)
+  const [reenriching, setReenriching] = useState<string | null>(null)
   const [analyzing, setAnalyzing] = useState<string | null>(null)
   const [filterMarketplace, setFilterMarketplace] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
@@ -63,10 +70,12 @@ export default function Products() {
   const [jobType, setJobType] = useState('both')
   const [hookTypes, setHookTypes] = useState<string[]>(['curiosity'])
   const [contentStyle, setContentStyle] = useState('')
+  const [scriptModel, setScriptModel] = useState('')
   const [audioEnabled, setAudioEnabled] = useState(true)
   const [audioMood, setAudioMood] = useState('auto')
   const [useTts, setUseTts] = useState(false)
   const [creatingJob, setCreatingJob] = useState(false)
+  const [models, setModels] = useState<string[]>([])
 
   const fetchProducts = async () => {
     setLoading(true)
@@ -86,15 +95,68 @@ export default function Products() {
 
   useEffect(() => { fetchProducts() }, [filterMarketplace, filterStatus])
 
+  useEffect(() => {
+    api.ollamaModels().then((d) => {
+      if (d.status === 'ok' && d.models) {
+        setModels(d.models.map((m: any) => m.name))
+      }
+    }).catch(() => {})
+    api.getConfig().then((c) => {
+      if (c.default_script_model) setScriptModel(c.default_script_model)
+    }).catch(() => {})
+  }, [])
+
   const handleImport = async () => {
     setImporting(true)
     try {
-      await api.importProducts(importMarketplace, 20)
+      const result = await api.importProducts(importMarketplace, 20)
       await fetchProducts()
+      alert(`Import complete: ${result.imported} new, ${result.updated || 0} updated`)
     } catch (e: any) {
-      alert(`Import failed: ${e.message}. Make sure APF is running.`)
+      alert(`Import failed: ${e.message}`)
     } finally {
       setImporting(false)
+    }
+  }
+
+  const handleScrape = async () => {
+    setScraping(true)
+    try {
+      await api.refreshProducts(importMarketplace)
+      alert(`Scrape started for ${importMarketplace}. Wait a few minutes, then Import.`)
+    } catch (e: any) {
+      alert(`Scrape failed: ${e.message}`)
+    } finally {
+      setScraping(false)
+    }
+  }
+
+  const handleReenrich = async (id: string) => {
+    setReenriching(id)
+    try {
+      await api.reenrichProduct(id)
+      await fetchProducts()
+      if (selectedProduct?.id === id) {
+        const data = await api.getProducts()
+        const updated = data.products.find((p: Product) => p.id === id)
+        if (updated) setSelectedProduct(updated)
+      }
+    } catch (e: any) {
+      alert(`Re-enrich failed: ${e.message}`)
+    } finally {
+      setReenriching(null)
+    }
+  }
+
+  const handleStatus = async (id: string, status: string) => {
+    try {
+      await api.updateProductStatus(id, status)
+      await fetchProducts()
+      if (selectedProduct?.id === id) {
+        setSelectedProduct({ ...selectedProduct, status })
+      }
+    } catch (e: any) {
+      alert(`Status update failed: ${e.message}`)
     }
   }
 
@@ -103,10 +165,11 @@ export default function Products() {
     try {
       const result = await api.analyzeProduct(id)
       await fetchProducts()
-      const updated = products.find((p) => p.id === id)
-      if (updated) setSelectedProduct({ ...updated, ai_analysis: result.analysis, status: 'analyzed' })
+      if (selectedProduct?.id === id) {
+        setSelectedProduct({ ...selectedProduct, ai_analysis: result.analysis, status: 'analyzed' })
+      }
     } catch (e: any) {
-      alert(`Analysis failed: ${e.message}. Make sure Ollama is running.`)
+      alert(`Analysis failed: ${e.message}`)
     } finally {
       setAnalyzing(null)
     }
@@ -117,9 +180,6 @@ export default function Products() {
     setJobType('both')
     setHookTypes(['curiosity'])
     setContentStyle(product.recommended_content_style || '')
-    setAudioEnabled(true)
-    setAudioMood('auto')
-    setUseTts(false)
   }
 
   const toggleHook = (id: string) => {
@@ -136,7 +196,7 @@ export default function Products() {
     if (!jobModalProduct) return
     setCreatingJob(true)
     try {
-      await api.createJob(jobModalProduct.id, jobType, undefined, {
+      await api.createJob(jobModalProduct.id, jobType, scriptModel || undefined, {
         hook_types: hookTypes,
         content_style: contentStyle || undefined,
         audio_enabled: audioEnabled,
@@ -162,21 +222,21 @@ export default function Products() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Product Pipeline</h1>
-          <p className="text-brand-text-dim text-sm mt-1">Import from APF, analyze, and send to ShadowCast</p>
+          <p className="text-brand-text-dim text-sm mt-1">Scrape APF → import → enrich → approve → render</p>
         </div>
         <div className="flex items-center gap-3">
-          <select
-            className="input-field text-sm"
-            value={importMarketplace}
-            onChange={(e) => setImportMarketplace(e.target.value)}
-          >
+          <select className="input-field text-sm" value={importMarketplace} onChange={(e) => setImportMarketplace(e.target.value)}>
             {MARKETPLACES.map((m) => (
               <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1)}</option>
             ))}
           </select>
+          <button onClick={handleScrape} disabled={scraping} className="btn-secondary flex items-center gap-2">
+            {scraping ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CloudDownload className="w-4 h-4" />}
+            {scraping ? 'Scraping...' : 'Scrape APF'}
+          </button>
           <button onClick={handleImport} disabled={importing} className="btn-primary flex items-center gap-2">
             {importing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-            {importing ? 'Importing...' : 'Import from APF'}
+            {importing ? 'Importing...' : 'Import'}
           </button>
         </div>
       </div>
@@ -184,19 +244,11 @@ export default function Products() {
       <div className="flex items-center gap-3 flex-wrap">
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-text-dim" />
-          <input
-            type="text"
-            placeholder="Search products..."
-            className="input-field w-full pl-9"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
+          <input type="text" placeholder="Search products..." className="input-field w-full pl-9" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
         </div>
         <select className="input-field text-sm" value={filterMarketplace} onChange={(e) => setFilterMarketplace(e.target.value)}>
           <option value="">All Marketplaces</option>
-          {MARKETPLACES.map((m) => (
-            <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1)}</option>
-          ))}
+          {MARKETPLACES.map((m) => <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1)}</option>)}
         </select>
         <select className="input-field text-sm" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
           <option value="">All Statuses</option>
@@ -214,79 +266,47 @@ export default function Products() {
         <table className="w-full">
           <thead>
             <tr className="border-b border-brand-border text-left">
-              <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase tracking-wider">Product</th>
-              <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase tracking-wider">Marketplace</th>
-              <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase tracking-wider">Price</th>
-              <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase tracking-wider">Commission</th>
-              <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase tracking-wider">Status</th>
-              <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase tracking-wider">Actions</th>
+              <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase">Product</th>
+              <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase">Marketplace</th>
+              <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase">Style</th>
+              <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase">Status</th>
+              <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase">Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
               Array.from({ length: 5 }).map((_, i) => (
                 <tr key={i} className="border-b border-brand-border/50 animate-pulse">
-                  <td className="px-4 py-3"><div className="h-4 w-40 bg-brand-border rounded" /></td>
-                  <td className="px-4 py-3"><div className="h-4 w-20 bg-brand-border rounded" /></td>
-                  <td className="px-4 py-3"><div className="h-4 w-12 bg-brand-border rounded" /></td>
-                  <td className="px-4 py-3"><div className="h-4 w-12 bg-brand-border rounded" /></td>
-                  <td className="px-4 py-3"><div className="h-4 w-16 bg-brand-border rounded" /></td>
-                  <td className="px-4 py-3"><div className="h-4 w-24 bg-brand-border rounded" /></td>
+                  <td colSpan={5} className="px-4 py-3"><div className="h-4 w-full bg-brand-border rounded" /></td>
                 </tr>
               ))
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={6} className="px-4 py-12 text-center text-brand-text-dim">
+                <td colSpan={5} className="px-4 py-12 text-center text-brand-text-dim">
                   <Package className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                  <p>No products found. Import some from APF to get started.</p>
+                  <p>Scrape APF, then Import to populate products.</p>
                 </td>
               </tr>
             ) : (
               filtered.map((product) => (
-                <tr
-                  key={product.id}
-                  className="border-b border-brand-border/50 hover:bg-brand-surface/50 cursor-pointer transition-colors"
-                  onClick={() => setSelectedProduct(product)}
-                >
+                <tr key={product.id} className="border-b border-brand-border/50 hover:bg-brand-surface/50 cursor-pointer" onClick={() => setSelectedProduct(product)}>
                   <td className="px-4 py-3">
                     <p className="text-sm font-medium truncate max-w-[250px]">{product.name}</p>
-                    <p className="text-xs text-brand-text-dim truncate max-w-[250px]">{product.category}</p>
+                    <p className="text-xs text-brand-text-dim">{product.category}</p>
                   </td>
-                  <td className="px-4 py-3">
-                    <span className="text-sm capitalize">{product.marketplace}</span>
-                  </td>
-                  <td className="px-4 py-3 text-sm">{product.price || '—'}</td>
-                  <td className="px-4 py-3 text-sm">{product.commission || '—'}</td>
+                  <td className="px-4 py-3 text-sm capitalize">{product.marketplace}</td>
+                  <td className="px-4 py-3 text-xs text-brand-text-dim">{product.recommended_content_style?.replace(/_/g, ' ') || '—'}</td>
                   <td className="px-4 py-3"><StatusBadge status={product.status} /></td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                      <button
-                        onClick={() => handleAnalyze(product.id)}
-                        disabled={analyzing === product.id}
-                        className="p-1.5 rounded-lg hover:bg-brand-card text-brand-text-dim hover:text-brand-accent transition-colors"
-                        title="Analyze with AI"
-                      >
-                        {analyzing === product.id ? (
-                          <RefreshCw className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <Brain className="w-4 h-4" />
-                        )}
+                      <button onClick={() => handleAnalyze(product.id)} disabled={analyzing === product.id} className="p-1.5 rounded-lg hover:bg-brand-card text-brand-text-dim hover:text-brand-accent" title="Analyze">
+                        {analyzing === product.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Brain className="w-4 h-4" />}
                       </button>
-                      <button
-                        onClick={() => openJobModal(product)}
-                        className="p-1.5 rounded-lg hover:bg-brand-card text-brand-text-dim hover:text-brand-success transition-colors"
-                        title="Create video job"
-                      >
+                      <button onClick={() => openJobModal(product)} className="p-1.5 rounded-lg hover:bg-brand-card text-brand-text-dim hover:text-brand-success" title="Create job">
                         <Video className="w-4 h-4" />
                       </button>
                       {product.url && (
-                        <a
-                          href={product.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="p-1.5 rounded-lg hover:bg-brand-card text-brand-text-dim hover:text-brand-text transition-colors"
-                          title="Open product page"
-                        >
+                        <a href={product.url} target="_blank" rel="noopener noreferrer" className="p-1.5 rounded-lg hover:bg-brand-card text-brand-text-dim">
                           <ExternalLink className="w-4 h-4" />
                         </a>
                       )}
@@ -299,67 +319,86 @@ export default function Products() {
         </table>
       </div>
 
-      <p className="text-xs text-brand-text-dim">
-        Showing {filtered.length} of {total} products
-      </p>
+      <p className="text-xs text-brand-text-dim">Showing {filtered.length} of {total} products</p>
 
-      {selectedProduct && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setSelectedProduct(null)}>
-          <div className="bg-brand-card border border-brand-border rounded-xl max-w-2xl w-full max-h-[80vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-start justify-between mb-4">
-              <div>
-                <h2 className="text-lg font-bold">{selectedProduct.name}</h2>
-                <p className="text-sm text-brand-text-dim capitalize">{selectedProduct.marketplace} · {selectedProduct.category}</p>
+      {selectedProduct && (() => {
+        const brief = parseBrief(selectedProduct)
+        return (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setSelectedProduct(null)}>
+            <div className="bg-brand-card border border-brand-border rounded-xl max-w-2xl w-full max-h-[80vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-start justify-between mb-4">
+                <div>
+                  <h2 className="text-lg font-bold">{selectedProduct.name}</h2>
+                  <p className="text-sm text-brand-text-dim capitalize">{selectedProduct.marketplace} · {selectedProduct.category}</p>
+                </div>
+                <StatusBadge status={selectedProduct.status} size="md" />
               </div>
-              <StatusBadge status={selectedProduct.status} size="md" />
-            </div>
 
-            <div className="grid grid-cols-3 gap-4 mb-4">
-              <div className="bg-brand-surface rounded-lg p-3">
-                <p className="text-xs text-brand-text-dim">Price</p>
-                <p className="text-lg font-bold">{selectedProduct.price || '—'}</p>
+              <div className="grid grid-cols-3 gap-4 mb-4">
+                <div className="bg-brand-surface rounded-lg p-3">
+                  <p className="text-xs text-brand-text-dim">Price</p>
+                  <p className="text-lg font-bold">{selectedProduct.price || '—'}</p>
+                </div>
+                <div className="bg-brand-surface rounded-lg p-3">
+                  <p className="text-xs text-brand-text-dim">Commission</p>
+                  <p className="text-lg font-bold">{selectedProduct.commission || '—'}</p>
+                </div>
+                <div className="bg-brand-surface rounded-lg p-3">
+                  <p className="text-xs text-brand-text-dim">Gem Score</p>
+                  <p className="text-lg font-bold">{selectedProduct.gravity_score || '—'}</p>
+                </div>
               </div>
-              <div className="bg-brand-surface rounded-lg p-3">
-                <p className="text-xs text-brand-text-dim">Commission</p>
-                <p className="text-lg font-bold">{selectedProduct.commission || '—'}</p>
-              </div>
-              <div className="bg-brand-surface rounded-lg p-3">
-                <p className="text-xs text-brand-text-dim">Gravity</p>
-                <p className="text-lg font-bold">{selectedProduct.gravity_score || '—'}</p>
-              </div>
-            </div>
 
-            {selectedProduct.description && (
-              <div className="mb-4">
-                <h3 className="text-sm font-semibold text-brand-text-dim mb-2">Description</h3>
-                <p className="text-sm bg-brand-surface rounded-lg p-3">{selectedProduct.description}</p>
-              </div>
-            )}
+              {selectedProduct.recommended_content_style && (
+                <div className="mb-4 bg-brand-accent/10 border border-brand-accent/20 rounded-lg p-3">
+                  <p className="text-xs text-brand-accent font-semibold uppercase">Recommended Style</p>
+                  <p className="text-sm mt-1">{selectedProduct.recommended_content_style.replace(/_/g, ' ')}</p>
+                </div>
+              )}
 
-            {selectedProduct.ai_analysis && (
-              <div className="mb-4">
-                <h3 className="text-sm font-semibold text-brand-accent mb-2">AI Analysis</h3>
-                <div className="text-sm bg-brand-surface rounded-lg p-3 whitespace-pre-wrap">{selectedProduct.ai_analysis}</div>
-              </div>
-            )}
+              {brief.review_summary && (
+                <div className="mb-4">
+                  <h3 className="text-sm font-semibold text-brand-text-dim mb-2">Review Brief</h3>
+                  <p className="text-sm bg-brand-surface rounded-lg p-3">{brief.review_summary}</p>
+                  {brief.best_video_angles?.length > 0 && (
+                    <ul className="mt-2 text-xs text-brand-text-dim list-disc list-inside">
+                      {brief.best_video_angles.slice(0, 3).map((a: string, i: number) => <li key={i}>{a}</li>)}
+                    </ul>
+                  )}
+                </div>
+              )}
 
-            <div className="flex items-center gap-3 pt-4 border-t border-brand-border">
-              <button
-                onClick={() => { handleAnalyze(selectedProduct.id); }}
-                disabled={analyzing === selectedProduct.id}
-                className="btn-secondary flex items-center gap-2"
-              >
-                {analyzing === selectedProduct.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Brain className="w-4 h-4" />}
-                {analyzing === selectedProduct.id ? 'Analyzing...' : 'Analyze'}
-              </button>
-              <button onClick={() => { openJobModal(selectedProduct); }} className="btn-primary flex items-center gap-2">
-                <Video className="w-4 h-4" /> Create Video Job
-              </button>
-              <button onClick={() => setSelectedProduct(null)} className="btn-secondary ml-auto">Close</button>
+              {selectedProduct.ai_analysis && (
+                <div className="mb-4">
+                  <h3 className="text-sm font-semibold text-brand-accent mb-2">AI Analysis</h3>
+                  <div className="text-sm bg-brand-surface rounded-lg p-3 whitespace-pre-wrap">{selectedProduct.ai_analysis}</div>
+                </div>
+              )}
+
+              <div className="flex items-center gap-3 pt-4 border-t border-brand-border flex-wrap">
+                <button onClick={() => handleStatus(selectedProduct.id, 'approved')} className="btn-secondary flex items-center gap-2 text-brand-success">
+                  <Check className="w-4 h-4" /> Approve
+                </button>
+                <button onClick={() => handleStatus(selectedProduct.id, 'rejected')} className="btn-secondary flex items-center gap-2 text-brand-error">
+                  <X className="w-4 h-4" /> Reject
+                </button>
+                <button onClick={() => handleReenrich(selectedProduct.id)} disabled={reenriching === selectedProduct.id} className="btn-secondary flex items-center gap-2">
+                  {reenriching === selectedProduct.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CloudDownload className="w-4 h-4" />}
+                  Re-enrich
+                </button>
+                <button onClick={() => handleAnalyze(selectedProduct.id)} disabled={analyzing === selectedProduct.id} className="btn-secondary flex items-center gap-2">
+                  {analyzing === selectedProduct.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Brain className="w-4 h-4" />}
+                  Analyze
+                </button>
+                <button onClick={() => { openJobModal(selectedProduct); setSelectedProduct(null) }} className="btn-primary flex items-center gap-2">
+                  <Video className="w-4 h-4" /> Create Job
+                </button>
+                <button onClick={() => setSelectedProduct(null)} className="btn-secondary ml-auto">Close</button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       {jobModalProduct && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setJobModalProduct(null)}>
@@ -368,68 +407,55 @@ export default function Products() {
               <h2 className="text-lg font-bold">Create Video Job</h2>
               <p className="text-sm text-brand-text-dim mt-1">{jobModalProduct.name}</p>
             </div>
-
             <div>
-              <label className="text-xs text-brand-text-dim uppercase tracking-wider">Format</label>
+              <label className="text-xs text-brand-text-dim uppercase">Format</label>
               <select className="input-field w-full mt-1" value={jobType} onChange={(e) => setJobType(e.target.value)}>
                 <option value="both">Short + Long</option>
                 <option value="short">Short only</option>
                 <option value="long">Long only</option>
               </select>
             </div>
-
             <div>
-              <label className="text-xs text-brand-text-dim uppercase tracking-wider">Content style</label>
-              <select className="input-field w-full mt-1" value={contentStyle} onChange={(e) => setContentStyle(e.target.value)}>
-                <option value="">Use product recommendation</option>
-                {CONTENT_STYLES.map((s) => (
-                  <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
-                ))}
+              <label className="text-xs text-brand-text-dim uppercase">Script model</label>
+              <select className="input-field w-full mt-1" value={scriptModel} onChange={(e) => setScriptModel(e.target.value)}>
+                {models.length === 0 && <option value={scriptModel}>{scriptModel || 'default'}</option>}
+                {models.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
             </div>
-
             <div>
-              <label className="text-xs text-brand-text-dim uppercase tracking-wider mb-2 block">Hooks</label>
+              <label className="text-xs text-brand-text-dim uppercase">Content style</label>
+              <select className="input-field w-full mt-1" value={contentStyle} onChange={(e) => setContentStyle(e.target.value)}>
+                <option value="">Use product recommendation</option>
+                {CONTENT_STYLES.map((s) => <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs text-brand-text-dim uppercase mb-2 block">Hooks</label>
               <div className="flex flex-wrap gap-2">
                 {HOOK_OPTIONS.map((h) => (
-                  <button
-                    key={h.id}
-                    type="button"
-                    onClick={() => toggleHook(h.id)}
-                    className={`text-xs px-2 py-1 rounded border ${
-                      hookTypes.includes(h.id)
-                        ? 'border-brand-accent text-brand-accent bg-brand-accent/10'
-                        : 'border-brand-border text-brand-text-dim'
-                    }`}
-                  >
+                  <button key={h.id} type="button" onClick={() => toggleHook(h.id)}
+                    className={`text-xs px-2 py-1 rounded border ${hookTypes.includes(h.id) ? 'border-brand-accent text-brand-accent bg-brand-accent/10' : 'border-brand-border text-brand-text-dim'}`}>
                     {h.label}
                   </button>
                 ))}
               </div>
             </div>
-
             <div className="flex items-center gap-4 flex-wrap">
               <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={audioEnabled} onChange={(e) => setAudioEnabled(e.target.checked)} />
-                Music & SFX
+                <input type="checkbox" checked={audioEnabled} onChange={(e) => setAudioEnabled(e.target.checked)} /> Music & SFX
               </label>
               <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={useTts} onChange={(e) => setUseTts(e.target.checked)} />
-                Voiceover (TTS)
+                <input type="checkbox" checked={useTts} onChange={(e) => setUseTts(e.target.checked)} /> Voiceover
               </label>
             </div>
-
             {audioEnabled && (
               <div>
-                <label className="text-xs text-brand-text-dim uppercase tracking-wider">Music mood</label>
+                <label className="text-xs text-brand-text-dim uppercase">Music mood</label>
                 <select className="input-field w-full mt-1" value={audioMood} onChange={(e) => setAudioMood(e.target.value)}>
-                  {AUDIO_MOODS.map((m) => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
+                  {AUDIO_MOODS.map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
               </div>
             )}
-
             <div className="flex items-center gap-3 pt-2 border-t border-brand-border">
               <button onClick={handleCreateJob} disabled={creatingJob} className="btn-primary flex items-center gap-2">
                 {creatingJob ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Video className="w-4 h-4" />}

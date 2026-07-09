@@ -7,6 +7,8 @@ import {
 interface Stats {
   total_products: number
   analyzed_products: number
+  enriched_products?: number
+  approved_products?: number
   total_jobs: number
   completed_jobs: number
   queued_jobs: number
@@ -78,7 +80,9 @@ export default function Analytics() {
             <span className="text-xs text-brand-text-dim">Products</span>
           </div>
           <p className="text-3xl font-bold">{stats.total_products}</p>
-          <p className="text-xs text-brand-text-dim mt-1">{stats.analyzed_products} analyzed ({analysisRate}%)</p>
+          <p className="text-xs text-brand-text-dim mt-1">
+            {stats.enriched_products ?? 0} enriched · {stats.analyzed_products} analyzed ({analysisRate}%)
+          </p>
         </div>
 
         <div className="card">
@@ -185,7 +189,9 @@ export default function Analytics() {
         <div className="flex items-end justify-between gap-4 h-48">
           {[
             { label: 'Imported', value: stats.total_products, color: 'bg-brand-accent' },
+            { label: 'Enriched', value: stats.enriched_products ?? 0, color: 'bg-cyan-500' },
             { label: 'Analyzed', value: stats.analyzed_products, color: 'bg-blue-500' },
+            { label: 'Approved', value: stats.approved_products ?? 0, color: 'bg-indigo-500' },
             { label: 'Jobs Created', value: stats.total_jobs, color: 'bg-purple-500' },
             { label: 'Completed', value: stats.completed_jobs, color: 'bg-brand-success' },
             { label: 'Scheduled', value: stats.scheduled_events, color: 'bg-yellow-500' },

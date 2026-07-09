@@ -45,7 +45,13 @@ DEFAULT_CONFIG = {
     "default_analysis_model": "llama3.1:8b",
     "default_creative_model": "mistral:7b-instruct",
     "heavy_reasoning_model": "mixtral:8x7b-instruct-v0.1-q4_K_M",
+    "default_hook_types": "curiosity",
+    "default_content_style": "honest_review",
+    "apf_session_cookie": "",
 }
+
+SECRET_CONFIG_KEYS = {"internal_service_secret"}
+CONFIG_ALLOWLIST = set(DEFAULT_CONFIG.keys()) | SECRET_CONFIG_KEYS
 
 
 # ── Database ──────────────────────────────────────────────────────────
@@ -148,6 +154,7 @@ def init_db():
                 (env_secret,),
             )
 
+    _recover_stuck_jobs(conn)
     conn.commit()
     conn.close()
 
@@ -203,6 +210,27 @@ def get_config() -> dict:
     rows = conn.execute("SELECT key, value FROM config").fetchall()
     conn.close()
     return {row["key"]: row["value"] for row in rows}
+
+
+def get_public_config() -> dict:
+    cfg = get_config()
+    out = {}
+    for key, value in cfg.items():
+        if key in SECRET_CONFIG_KEYS and value:
+            out[key] = f"{'*' * max(0, len(value) - 4)}{value[-4:]}" if len(value) > 4 else "****"
+        else:
+            out[key] = value
+    return out
+
+
+def _recover_stuck_jobs(conn):
+    conn.execute(
+        """UPDATE video_jobs SET status = 'failed',
+           error_message = 'Interrupted — server restarted while job was active'
+           WHERE status IN ('generating_script', 'rendering')
+           AND started_at != ''
+           AND datetime(started_at) < datetime('now', '-35 minutes')"""
+    )
 
 
 def log_activity(action: str, details: str = ""):
@@ -374,9 +402,13 @@ def _local_product_info(product) -> dict:
 
 def _service_headers(config: dict) -> dict:
     secret = config.get("internal_service_secret", "")
-    if not secret:
-        return {}
-    return {"X-Service-Key": secret}
+    headers = {}
+    if secret:
+        headers["X-Service-Key"] = secret
+    cookie = (config.get("apf_session_cookie") or "").strip()
+    if cookie:
+        headers["Cookie"] = f"app_session_id={cookie}" if "=" not in cookie else cookie
+    return headers
 
 
 def _parse_trpc_response(data: dict):
@@ -391,6 +423,17 @@ async def _apf_trpc_get(client: httpx.AsyncClient, config: dict, procedure: str,
     r = await client.get(
         f"{config['apf_url']}/api/trpc/{procedure}",
         params={"input": trpc_input},
+        headers=_service_headers(config),
+    )
+    if r.status_code != 200:
+        return None
+    return _parse_trpc_response(r.json())
+
+
+async def _apf_trpc_post(client: httpx.AsyncClient, config: dict, procedure: str, input_data: dict):
+    r = await client.post(
+        f"{config['apf_url']}/api/trpc/{procedure}",
+        json={"json": input_data},
         headers=_service_headers(config),
     )
     if r.status_code != 200:
@@ -603,7 +646,40 @@ def _upsert_product_from_apf(
             apf_import_token,
         ),
     )
-    return pid
+    return pid, bool(existing)
+
+
+async def _normalize_and_store_enrichment(
+    client: httpx.AsyncClient,
+    config: dict,
+    p: dict,
+    enriched_payload: dict,
+) -> tuple[str, list, dict, str, str]:
+    recommended_style, competitors, review_brief = _extract_enrichment_fields(enriched_payload)
+    product_info_json = ""
+    apf_import_token = ""
+    if enriched_payload:
+        try:
+            r = await client.post(
+                f"{config['shadowcast_url']}/api/import-apf/direct",
+                json=enriched_payload,
+                headers=_service_headers(config),
+            )
+            if r.status_code == 200:
+                body = r.json()
+                normalized = body.get("normalized") or {}
+                if normalized:
+                    product_info_json = _json_dumps(
+                        _normalized_to_generate_product_info(normalized)
+                    )
+                apf_import_token = body.get("token") or ""
+                if body.get("recommended_content_style"):
+                    recommended_style = _normalize_content_style(
+                        body["recommended_content_style"]
+                    )
+        except Exception:
+            pass
+    return recommended_style, competitors, review_brief, product_info_json, apf_import_token
 
 
 # ── Pydantic Models ───────────────────────────────────────────────────
@@ -615,6 +691,15 @@ class ConfigUpdate(BaseModel):
 class ProductImport(BaseModel):
     marketplace: str
     limit: int = 20
+
+
+class ProductRefresh(BaseModel):
+    marketplace: str
+
+
+class CredentialSave(BaseModel):
+    platform: str
+    api_key: str
 
 
 class VideoJobCreate(BaseModel):
@@ -648,11 +733,13 @@ async def health_check():
 
 @app.get("/api/config")
 async def get_all_config():
-    return get_config()
+    return get_public_config()
 
 
 @app.put("/api/config")
 async def update_config(update: ConfigUpdate):
+    if update.key not in CONFIG_ALLOWLIST:
+        raise HTTPException(status_code=400, detail=f"Unknown config key: {update.key}")
     conn = get_db()
     conn.execute(
         "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
@@ -778,9 +865,15 @@ async def list_products(
     query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     rows = conn.execute(query, params).fetchall()
-    count = conn.execute(
-        "SELECT COUNT(*) as cnt FROM products"
-    ).fetchone()["cnt"]
+    count_query = "SELECT COUNT(*) as cnt FROM products WHERE 1=1"
+    count_params = []
+    if status:
+        count_query += " AND status = ?"
+        count_params.append(status)
+    if marketplace:
+        count_query += " AND marketplace = ?"
+        count_params.append(marketplace)
+    count = conn.execute(count_query, count_params).fetchone()["cnt"]
     conn.close()
     return {"products": [dict(r) for r in rows], "total": count}
 
@@ -805,6 +898,8 @@ async def import_products_from_apf(req: ProductImport):
 
             conn = get_db()
             imported = 0
+            updated = 0
+            skipped = 0
             for p in products:
                 apf_id = p.get("id")
                 enriched_payload = {}
@@ -816,46 +911,15 @@ async def import_products_from_apf(req: ProductImport):
                     except (TypeError, ValueError):
                         enriched_payload = {}
 
-                recommended_style, competitors, review_brief = _extract_enrichment_fields(
-                    enriched_payload
-                )
+                (
+                    recommended_style,
+                    competitors,
+                    review_brief,
+                    product_info_json,
+                    apf_import_token,
+                ) = await _normalize_and_store_enrichment(client, config, p, enriched_payload)
 
-                product_info_json = ""
-                apf_import_token = ""
-                normalize_warning = None
-                if enriched_payload:
-                    try:
-                        r = await client.post(
-                            f"{config['shadowcast_url']}/api/import-apf/direct",
-                            json=enriched_payload,
-                            headers=_service_headers(config),
-                        )
-                        if r.status_code == 200:
-                            body = r.json()
-                            normalized = body.get("normalized") or {}
-                            if normalized:
-                                product_info_json = _json_dumps(
-                                    _normalized_to_generate_product_info(normalized)
-                                )
-                            else:
-                                normalize_warning = "empty normalized payload"
-                            apf_import_token = body.get("token") or ""
-                            if body.get("recommended_content_style"):
-                                recommended_style = _normalize_content_style(
-                                    body["recommended_content_style"]
-                                )
-                        else:
-                            normalize_warning = f"HTTP {r.status_code}: {r.text[:120]}"
-                    except Exception as e:
-                        normalize_warning = str(e)
-
-                if normalize_warning:
-                    log_activity(
-                        "apf_normalize_failed",
-                        f"{p.get('name', apf_id)}: {normalize_warning}",
-                    )
-
-                _upsert_product_from_apf(
+                _, was_update = _upsert_product_from_apf(
                     conn,
                     req.marketplace,
                     p,
@@ -866,15 +930,18 @@ async def import_products_from_apf(req: ProductImport):
                     product_info_json,
                     apf_import_token,
                 )
-                imported += 1
+                if was_update:
+                    updated += 1
+                else:
+                    imported += 1
 
             conn.commit()
             conn.close()
             log_activity(
                 "products_imported",
-                f"{imported} products from {req.marketplace}",
+                f"{imported} new, {updated} updated from {req.marketplace}",
             )
-            return {"status": "ok", "imported": imported}
+            return {"status": "ok", "imported": imported, "updated": updated, "skipped": skipped}
     except HTTPException:
         raise
     except Exception as e:
@@ -927,9 +994,146 @@ Provide a brief analysis covering:
                 conn.close()
                 log_activity("product_analyzed", product["name"])
                 return {"status": "ok", "analysis": analysis}
+            conn.close()
+            raise HTTPException(status_code=502, detail=f"Ollama returned {r.status_code}")
+    except HTTPException:
+        raise
     except Exception as e:
         conn.close()
         raise HTTPException(status_code=502, detail=f"Ollama error: {e}")
+
+
+@app.post("/api/products/refresh")
+async def refresh_products_from_apf(req: ProductRefresh, background_tasks: BackgroundTasks):
+    """Trigger APF marketplace scrape (can take up to 15 min for digistore24)."""
+    config = get_config()
+
+    async def _run_refresh():
+        try:
+            async with httpx.AsyncClient(timeout=900.0) as client:
+                result = await _apf_trpc_post(
+                    client, config, "products.refresh", {"platform": req.marketplace}
+                )
+                if result is None:
+                    log_activity("apf_refresh_failed", req.marketplace)
+                else:
+                    log_activity(
+                        "apf_refreshed",
+                        f"{req.marketplace}: {result.get('productsCount', '?')} products",
+                    )
+        except Exception as e:
+            log_activity("apf_refresh_failed", f"{req.marketplace}: {e}")
+
+    background_tasks.add_task(_run_refresh)
+    return {"status": "started", "marketplace": req.marketplace}
+
+
+@app.get("/api/products/search")
+async def search_products(q: str, marketplace: str):
+    config = get_config()
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        results = await _apf_trpc_get(
+            client, config, "products.search", {"platform": marketplace, "query": q}
+        )
+    if results is None:
+        raise HTTPException(status_code=502, detail="APF search failed")
+    return {"products": results if isinstance(results, list) else []}
+
+
+@app.post("/api/products/{product_id}/reenrich")
+async def reenrich_product(product_id: str):
+    config = get_config()
+    conn = get_db()
+    product = conn.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
+    if not product:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Product not found")
+    apf_id = product["apf_product_id"]
+    if not apf_id:
+        conn.close()
+        raise HTTPException(status_code=422, detail="Product has no APF id — re-import first")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        enriched_payload = await _fetch_apf_enriched_payload(client, config, int(apf_id))
+        (
+            recommended_style,
+            competitors,
+            review_brief,
+            product_info_json,
+            apf_import_token,
+        ) = await _normalize_and_store_enrichment(client, config, {"id": apf_id}, enriched_payload)
+        _upsert_product_from_apf(
+            conn,
+            product["marketplace"],
+            {"id": apf_id, "name": product["name"], "category": product["category"],
+             "commissionRate": product["commission"], "hiddenGemScore": product["gravity_score"],
+             "affiliateLink": product["url"], "description": product["description"]},
+            enriched_payload,
+            recommended_style,
+            competitors,
+            review_brief,
+            product_info_json,
+            apf_import_token,
+        )
+        conn.commit()
+        conn.close()
+    log_activity("product_reenriched", product["name"])
+    return {"status": "ok", "has_enrichment": bool(enriched_payload)}
+
+
+@app.get("/api/apf/credentials")
+async def get_apf_credentials():
+    config = get_config()
+    platforms = ["warriorplus", "digistore24", "clickbank", "shareasale"]
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        out = {}
+        for platform in platforms:
+            cred = await _apf_trpc_get(client, config, "credentials.get", {"platform": platform})
+            out[platform] = cred
+    return {"credentials": out}
+
+
+@app.put("/api/apf/credentials")
+async def save_apf_credential(req: CredentialSave):
+    config = get_config()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        result = await _apf_trpc_post(
+            client, config, "credentials.save", {"platform": req.platform, "apiKey": req.api_key}
+        )
+    if result is None:
+        raise HTTPException(status_code=502, detail="Failed to save credential")
+    log_activity("apf_credential_saved", req.platform)
+    return {"status": "saved", "platform": req.platform}
+
+
+@app.get("/api/shadowcast/hooks")
+async def shadowcast_hooks():
+    config = get_config()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(f"{config['shadowcast_url']}/api/hooks")
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail="ShadowCast hooks unavailable")
+    return r.json()
+
+
+@app.get("/api/shadowcast/content-styles")
+async def shadowcast_content_styles():
+    config = get_config()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(f"{config['shadowcast_url']}/api/content-styles")
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail="ShadowCast content-styles unavailable")
+    return r.json()
+
+
+@app.get("/api/shadowcast/providers")
+async def shadowcast_providers():
+    config = get_config()
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(f"{config['shadowcast_url']}/api/providers")
+    if r.status_code != 200:
+        raise HTTPException(status_code=502, detail="ShadowCast providers unavailable")
+    return r.json()
 
 
 @app.put("/api/products/{product_id}/status")
@@ -998,9 +1202,14 @@ async def create_video_job(req: VideoJobCreate, background_tasks: BackgroundTask
     job_id = str(uuid.uuid4())
     model = req.script_model or config.get("default_script_model", "llama3.1:8b")
 
+    hook_types = req.hook_types
+    if not hook_types:
+        default_hooks = config.get("default_hook_types", "curiosity")
+        hook_types = [h.strip() for h in default_hooks.split(",") if h.strip()] or ["curiosity"]
+
     job_options = {
-        "hook_types": req.hook_types or ["curiosity"],
-        "content_style": req.content_style,
+        "hook_types": hook_types,
+        "content_style": req.content_style or config.get("default_content_style"),
         "audio_enabled": req.audio_enabled,
         "audio_mood": req.audio_mood or "auto",
         "use_tts": req.use_tts,
@@ -1124,6 +1333,19 @@ async def run_video_job(job_id: str):
                 status_data = r.json()
 
             sc_status = status_data.get("status", "")
+            progress_meta = {
+                "shadowcast_job_id": sc_job_id,
+                "progress": status_data.get("progress"),
+                "current_step": status_data.get("current_step"),
+                "hook_types": hook_types,
+                "content_style": content_style,
+            }
+            conn.execute(
+                "UPDATE video_jobs SET script_json = ? WHERE id = ?",
+                (_json_dumps(progress_meta), job_id),
+            )
+            conn.commit()
+
             if sc_status == "complete":
                 # Fetch results
                 async with httpx.AsyncClient(timeout=10.0) as client:
@@ -1141,14 +1363,18 @@ async def run_video_job(job_id: str):
                     if "long_form" in videos:
                         long_path = f"{config['shadowcast_url']}/api/download/{sc_job_id}/{videos['long_form']}"
 
+                progress_meta["results_summary"] = {
+                    k: {"videos": v.get("videos", {})} for k, v in hooks.items() if isinstance(v, dict)
+                }
                 conn.execute(
                     """UPDATE video_jobs SET
                     status = 'completed',
                     short_form_path = ?,
                     long_form_path = ?,
+                    script_json = ?,
                     completed_at = datetime('now')
                     WHERE id = ?""",
-                    (short_path, long_path, job_id),
+                    (short_path, long_path, _json_dumps(progress_meta), job_id),
                 )
                 conn.commit()
                 log_activity("job_completed", f"Job {job_id} for {product['name']}")
@@ -1283,6 +1509,12 @@ async def analytics_overview():
         ).fetchone()["c"],
         "scheduled_events": conn.execute(
             "SELECT COUNT(*) as c FROM calendar_events WHERE status = 'scheduled'"
+        ).fetchone()["c"],
+        "enriched_products": conn.execute(
+            "SELECT COUNT(*) as c FROM products WHERE product_info_json != '' AND product_info_json != '{}'"
+        ).fetchone()["c"],
+        "approved_products": conn.execute(
+            "SELECT COUNT(*) as c FROM products WHERE status = 'approved'"
         ).fetchone()["c"],
         "products_by_marketplace": {},
         "jobs_by_status": {},

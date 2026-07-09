@@ -292,12 +292,13 @@ If any service runs on a different port, update it in Mission Control's Settings
 4. All three values must match exactly
 
 **Data Flow:**
-1. APF scrapes affiliate products from marketplaces
-2. Mission Control imports products from APF via tRPC
-3. You select a product and create a video job
-4. Mission Control sends the job to ShadowCast's `/api/generate`
-5. ShadowCast uses Ollama to generate scripts, then renders video
-6. Mission Control polls ShadowCast for completion and stores the result
+1. APF scrapes affiliate products (`products.refresh` from MC or APF UI)
+2. Mission Control imports via tRPC (`products.list` + `shadowCastPayload`)
+3. ShadowCast `/api/import-apf/direct` normalizes enriched payload
+4. Operator approves product in MC
+5. MC creates video job with hooks/style/model; sets ShadowCast Ollama config
+6. ShadowCast generates script + renders video
+7. MC polls status/results; operator schedules calendar event from completed job
 
 ---
 

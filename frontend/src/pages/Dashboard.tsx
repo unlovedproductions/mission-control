@@ -8,6 +8,7 @@ import {
 interface Stats {
   total_products: number
   analyzed_products: number
+  enriched_products?: number
   total_jobs: number
   completed_jobs: number
   queued_jobs: number
@@ -33,6 +34,7 @@ export default function Dashboard() {
         { label: 'Jobs Queued', value: stats.queued_jobs, icon: Clock, color: 'text-brand-warning' },
         { label: 'Failed Jobs', value: stats.failed_jobs, icon: AlertTriangle, color: 'text-brand-error' },
         { label: 'Analyzed', value: stats.analyzed_products, icon: TrendingUp, color: 'text-blue-400' },
+        { label: 'Enriched', value: stats.enriched_products ?? 0, icon: TrendingUp, color: 'text-cyan-400' },
         { label: 'Scheduled Posts', value: stats.scheduled_events, icon: Video, color: 'text-purple-400' },
       ]
     : []
@@ -110,8 +112,10 @@ export default function Dashboard() {
           <h3 className="text-sm font-semibold text-brand-text-dim uppercase tracking-wider mb-4">Recent Activity</h3>
           {stats && stats.recent_activity.length > 0 ? (
             <div className="space-y-2 max-h-64 overflow-y-auto">
-              {stats.recent_activity.slice(0, 10).map((act, i) => (
-                <div key={i} className="flex items-start gap-3 py-2 border-b border-brand-border/50 last:border-0">
+              {stats.recent_activity.slice(0, 10).map((act, i) => {
+                const isFailure = act.action.includes('failed') || act.action.includes('error')
+                return (
+                <div key={i} className={`flex items-start gap-3 py-2 border-b border-brand-border/50 last:border-0 ${isFailure ? 'text-brand-error' : ''}`}>
                   <Activity className="w-4 h-4 text-brand-accent mt-0.5 flex-shrink-0" />
                   <div className="min-w-0">
                     <p className="text-sm font-medium truncate">
@@ -125,7 +129,8 @@ export default function Dashboard() {
                     </p>
                   </div>
                 </div>
-              ))}
+                )
+              })}
             </div>
           ) : (
             <p className="text-brand-text-dim text-sm">No activity yet.</p>
