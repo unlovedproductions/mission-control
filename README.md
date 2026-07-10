@@ -2,6 +2,12 @@
 
 A unified orchestration dashboard that sits on top of **ShadowCast** (video renderer) and **APF** (affiliate product finder) without modifying either app. It communicates with both via their existing APIs and uses **Ollama** for local LLM inference.
 
+## Operational docs
+
+- `docs/RECOVERY.md` — disaster-recovery playbook
+- `docs/RUNBOOK.md` — startup/shutdown and operations checks
+- `docs/ARCHITECTURE.md` — architecture and data-flow reference
+
 ## Architecture
 
 ```

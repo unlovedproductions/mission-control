@@ -5,6 +5,14 @@
 
 ---
 
+## Operational docs
+
+- `docs/RECOVERY.md` for machine-loss, working-tree, and SQLite recovery.
+- `docs/RUNBOOK.md` for startup/shutdown and service checks.
+- `docs/ARCHITECTURE.md` for component and integration mapping.
+
+---
+
 ## Table of Contents
 
 1. [System Prerequisites](#1-system-prerequisites)
