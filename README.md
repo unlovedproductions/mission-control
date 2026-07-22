@@ -6,6 +6,8 @@ A unified orchestration dashboard that sits on top of **ShadowCast** (video rend
 
 - `docs/RECOVERY.md` — disaster-recovery playbook
 - `docs/RUNBOOK.md` — startup/shutdown and operations checks
+- `docs/LOCAL_STACK.md` — local triple-repo startup
+- `docs/SMOKE_TEST.md` — ecosystem smoke checklist
 - `docs/ARCHITECTURE.md` — architecture and data-flow reference
 
 ## Architecture
@@ -78,8 +80,8 @@ uvicorn main:app --host 0.0.0.0 --port 8100 --reload
 
 ```bash
 cd frontend
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 ```
 
 ### 3. Open Dashboard
@@ -212,7 +214,7 @@ mission-control/
 |---|---|
 | Ollama shows "Offline" | Run `ollama serve` in a terminal |
 | ShadowCast shows "Offline" | Start ShadowCast: `cd shadowcast && python app.py` |
-| APF shows "Offline" | Start APF: `cd apf && npm run dev` |
+| APF shows "Offline" | Start APF: `cd apf && pnpm run dev` |
 | Model pull fails | Check disk space and internet connection |
 | Video job fails | Check ShadowCast logs for render errors |
 | Port conflict | Change ports in Settings or vite.config.ts |

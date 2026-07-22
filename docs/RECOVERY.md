@@ -33,7 +33,7 @@ Mission Control orchestrates APF, ShadowCast, and Ollama from a single operation
    - `pip install -r requirements.txt`
 3. Frontend setup:
    - `cd ../frontend`
-   - `pnpm install` (or `npm install`)
+   - `pnpm install`
 4. Ensure APF, ShadowCast, and Ollama are reachable.
 5. Set `INTERNAL_SERVICE_SECRET` to the shared value.
 6. Start backend:

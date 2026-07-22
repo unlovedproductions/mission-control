@@ -83,6 +83,7 @@ export default function Products() {
       const params: Record<string, string> = {}
       if (filterMarketplace) params.marketplace = filterMarketplace
       if (filterStatus) params.status = filterStatus
+      if (searchQuery.trim()) params.q = searchQuery.trim()
       const data = await api.getProducts(params)
       setProducts(data.products)
       setTotal(data.total)
@@ -93,7 +94,7 @@ export default function Products() {
     }
   }
 
-  useEffect(() => { fetchProducts() }, [filterMarketplace, filterStatus])
+  useEffect(() => { fetchProducts() }, [filterMarketplace, filterStatus, searchQuery])
 
   useEffect(() => {
     api.ollamaModels().then((d) => {
@@ -213,9 +214,7 @@ export default function Products() {
     }
   }
 
-  const filtered = products.filter((p) =>
-    !searchQuery || p.name.toLowerCase().includes(searchQuery.toLowerCase())
-  )
+  const filtered = products
 
   return (
     <div className="space-y-6">

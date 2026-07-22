@@ -47,7 +47,7 @@ sudo apt install -y nodejs
 # Verify
 python3 --version   # Should be 3.10+
 node --version      # Should be 20+
-npm --version       # Should be 10+
+pnpm --version      # Should be 9+
 
 # Docker (needed for MySQL)
 sudo apt install -y docker.io docker-compose
@@ -160,7 +160,7 @@ git clone https://github.com/unlovedproductions/APF.git
 cd APF
 
 # Install dependencies
-npm install
+pnpm install
 
 # Create .env file
 SECRET="$(openssl rand -hex 32)"
@@ -184,12 +184,12 @@ Set it in Mission Control via Settings → **Internal Service Secret**, or expor
 
 **Push the database schema:**
 ```bash
-npm run db:push
+pnpm run db:push
 ```
 
 **Start APF:**
 ```bash
-npm run dev
+pnpm run dev
 # Runs on http://localhost:3000
 ```
 
@@ -262,8 +262,8 @@ uvicorn main:app --host 0.0.0.0 --port 8100 --reload
 
 # Frontend setup (in another terminal)
 cd ~/mission-control/frontend
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 # Runs on http://localhost:3100
 ```
 

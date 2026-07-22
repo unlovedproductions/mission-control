@@ -17,6 +17,18 @@ import sqlite3
 import time
 import uuid
 
+# ── Job lifecycle ───────────────────────────────────────────────────────
+_cancelled_jobs: set[str] = set()
+MAX_CONCURRENT_JOBS = int(os.environ.get("MC_MAX_CONCURRENT_JOBS", "2"))
+CORS_ORIGINS = [
+    o.strip()
+    for o in os.environ.get(
+        "MC_CORS_ORIGINS",
+        "http://localhost:3100,http://127.0.0.1:3100",
+    ).split(",")
+    if o.strip()
+]
+
 # ── App Setup ─────────────────────────────────────────────────────────
 app = FastAPI(
     title="Mission Control",
@@ -26,18 +38,21 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ── Configuration ─────────────────────────────────────────────────────
-DB_PATH = os.path.join(os.path.dirname(__file__), "mission_control.db")
+DB_PATH = os.environ.get(
+    "MC_DB_PATH",
+    os.path.join(os.path.dirname(__file__), "mission_control.db"),
+)
 
 DEFAULT_CONFIG = {
     "shadowcast_url": "http://localhost:8000",
-    "apf_url": "http://localhost:3001",
+    "apf_url": "http://localhost:3000",
     # Read internal service secret from environment to avoid hardcoding secrets
     "internal_service_secret": os.environ.get("INTERNAL_SERVICE_SECRET", ""),
     "ollama_url": "http://localhost:11434",
@@ -153,6 +168,14 @@ def init_db():
                    ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
                 (env_secret,),
             )
+
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
+        CREATE INDEX IF NOT EXISTS idx_products_marketplace ON products(marketplace);
+        CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
+        CREATE INDEX IF NOT EXISTS idx_video_jobs_status ON video_jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_calendar_scheduled ON calendar_events(scheduled_date);
+    """)
 
     _recover_stuck_jobs(conn)
     conn.commit()
@@ -477,6 +500,31 @@ async def _configure_shadowcast_llm(
         raise Exception(
             f"ShadowCast LLM config failed: {r.status_code} - {r.text[:200]}"
         )
+
+
+def _apply_ai_analysis(product, product_info: dict) -> dict:
+    """Merge MC Ollama analysis into product_info for ShadowCast script context."""
+    analysis = (product["ai_analysis"] or "").strip() if product else ""
+    if not analysis:
+        return product_info
+    out = dict(product_info)
+    out["ai_analysis"] = analysis
+    prefix = out.get("unique_selling_point") or ""
+    mc_block = f"Mission Control analysis:\n{analysis}"
+    out["unique_selling_point"] = f"{prefix}\n\n{mc_block}".strip() if prefix else mc_block
+    return out
+
+
+def _is_job_cancelled(job_id: str) -> bool:
+    return job_id in _cancelled_jobs
+
+
+def _count_active_jobs(conn) -> int:
+    row = conn.execute(
+        """SELECT COUNT(*) as c FROM video_jobs
+           WHERE status IN ('queued', 'generating_script', 'rendering')"""
+    ).fetchone()
+    return int(row["c"])
 
 
 def _is_thin_product_info(info: dict) -> bool:
@@ -850,6 +898,7 @@ async def get_running_models():
 async def list_products(
     status: Optional[str] = None,
     marketplace: Optional[str] = None,
+    q: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
 ):
@@ -862,6 +911,10 @@ async def list_products(
     if marketplace:
         query += " AND marketplace = ?"
         params.append(marketplace)
+    if q:
+        query += " AND (name LIKE ? OR description LIKE ? OR category LIKE ?)"
+        like = f"%{q}%"
+        params.extend([like, like, like])
     query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     rows = conn.execute(query, params).fetchall()
@@ -873,6 +926,10 @@ async def list_products(
     if marketplace:
         count_query += " AND marketplace = ?"
         count_params.append(marketplace)
+    if q:
+        count_query += " AND (name LIKE ? OR description LIKE ? OR category LIKE ?)"
+        like = f"%{q}%"
+        count_params.extend([like, like, like])
     count = conn.execute(count_query, count_params).fetchone()["cnt"]
     conn.close()
     return {"products": [dict(r) for r in rows], "total": count}
@@ -1199,6 +1256,14 @@ async def create_video_job(req: VideoJobCreate, background_tasks: BackgroundTask
             )
 
     config = get_config()
+    active = _count_active_jobs(conn)
+    if active >= MAX_CONCURRENT_JOBS:
+        conn.close()
+        raise HTTPException(
+            status_code=429,
+            detail=f"Maximum {MAX_CONCURRENT_JOBS} concurrent jobs — wait for active jobs to finish",
+        )
+
     job_id = str(uuid.uuid4())
     model = req.script_model or config.get("default_script_model", "llama3.1:8b")
 
@@ -1282,6 +1347,16 @@ async def run_video_job(job_id: str):
             product_info, content_style = await _resolve_shadowcast_product_info(
                 client, config, product, allow_thin=False
             )
+            product_info = _apply_ai_analysis(product, product_info)
+
+            if _is_job_cancelled(job_id):
+                conn.execute(
+                    """UPDATE video_jobs SET status = 'cancelled',
+                       error_message = 'Cancelled before ShadowCast submit' WHERE id = ?""",
+                    (job_id,),
+                )
+                conn.commit()
+                return
 
             hook_types = job_options.get("hook_types") or ["curiosity"]
             if isinstance(hook_types, str):
@@ -1326,6 +1401,14 @@ async def run_video_job(job_id: str):
         max_polls = 360  # 30 min max (5s intervals)
         for _ in range(max_polls):
             await asyncio.sleep(5)
+            if _is_job_cancelled(job_id):
+                conn.execute(
+                    """UPDATE video_jobs SET status = 'cancelled',
+                       error_message = 'Cancelled while polling ShadowCast' WHERE id = ?""",
+                    (job_id,),
+                )
+                conn.commit()
+                return
             async with httpx.AsyncClient(timeout=10.0) as client:
                 r = await client.get(f"{config['shadowcast_url']}/api/status/{sc_job_id}")
                 if r.status_code != 200:
@@ -1418,11 +1501,12 @@ async def get_job(job_id: str):
 
 @app.delete("/api/jobs/{job_id}")
 async def delete_job(job_id: str):
+    _cancelled_jobs.add(job_id)
     conn = get_db()
     conn.execute("DELETE FROM video_jobs WHERE id = ?", (job_id,))
     conn.commit()
     conn.close()
-    return {"status": "deleted"}
+    return {"status": "deleted", "cancelled": True}
 
 
 # ── Content Calendar ──────────────────────────────────────────────────
