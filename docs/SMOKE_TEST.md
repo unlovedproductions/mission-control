@@ -58,3 +58,7 @@ All three values must match.
 | Import | 2026-07-20 | Not run | Requires APF + MC backend up with matching secret |
 | Job | 2026-07-20 | Not run | Requires Ollama + ShadowCast |
 | Secret | 2026-07-20 | Manual | `grep INTERNAL_SERVICE_SECRET` across three `.env` files |
+| Health | 2026-07-22 | Fail | MC :8100 offline; SC :8000 offline; :3000 serves Open WebUI (not APF `/api/health`) |
+| Import | 2026-07-22 | Not run | Stack not up — run `scripts/start-ecosystem.sh` first |
+| Job | 2026-07-22 | Not run | Requires full stack + Ollama |
+| Secret | 2026-07-22 | Manual | Align `INTERNAL_SERVICE_SECRET` in three `backend/.env` files before import |
