@@ -1,24 +1,70 @@
 # Mission Control Architecture
 
 ## Intent
-Mission Control is an orchestration layer above APF and ShadowCast. It does not rewrite those systems; it coordinates them.
+
+Mission Control is an orchestration layer above APF and ShadowCast. It does not rewrite those systems; it coordinates them via HTTP APIs and uses Ollama for local LLM work.
+
+## Component diagram
+
+```
+┌─────────────────────────────────────────────┐
+│            Mission Control                   │
+│  React/Vite (:3100)  ──▶  FastAPI (:8100)   │
+│                              │               │
+│                     SQLite (mission_control.db)
+└──────────────────────────────┼───────────────┘
+          ┌────────────────────┼────────────────────┐
+          ▼                    ▼                    ▼
+   ShadowCast (:8000)     APF (:3000)         Ollama (:11434)
+```
 
 ## Components
-- Frontend: React + Vite app (`frontend`, port 3100)
-- Backend: FastAPI service (`backend/main.py`, port 8100)
-- Local persistence: SQLite (`backend/mission_control.db`)
 
-## External Integrations
-- APF APIs for product import and status
-- ShadowCast APIs for hooks/styles/job execution
-- Ollama API for local model operations
+| Piece | Location | Role |
+|-------|----------|------|
+| Frontend | `frontend/` | Dashboard UI (products, jobs, calendar, models, settings) |
+| Backend | `backend/main.py` | FastAPI orchestration, polling, persistence |
+| DB | `backend/mission_control.db` | Local SQLite (WAL) |
 
-## Core Flows
-1. Import products from APF.
-2. Review and approve products in Mission Control.
-3. Queue jobs for ShadowCast rendering.
-4. Track outputs and schedule content.
+## Persistence (high level)
 
-## Operational Constraints
-- Shared `INTERNAL_SERVICE_SECRET` must match across APF, ShadowCast, and Mission Control.
-- Full dashboard accuracy depends on APF/ShadowCast/Ollama uptime.
+| Table | Role |
+|-------|------|
+| `config` | Settings key/value (URLs, models, hooks/style, secret) |
+| `products` | Imported/enriched affiliate products and review state |
+| `video_jobs` | ShadowCast job tracking (paths, status, errors) |
+| `calendar_events` | Publish schedule |
+| `activity_log` | Operator-facing activity feed |
+
+## Auth
+
+- Machine-to-machine calls to APF and ShadowCast send `X-Service-Key` when an internal service secret is configured.
+- Secret sources: `INTERNAL_SERVICE_SECRET` env / `backend/.env`, optional `.service-secret` via `start-ecosystem.sh`, and SQLite `config.internal_service_secret` (seeded from env when empty).
+- See [CONFIGURATION.md](CONFIGURATION.md).
+
+## Core orchestration sequence
+
+1. **Import** — MC pulls products from APF (list + enrichment / ShadowCast payload), upserts into `products`.
+2. **Review / approve** — Operator reviews enrichment; sets product status.
+3. **Queue job** — MC configures ShadowCast LLM options and calls generate; creates `video_jobs` row.
+4. **Poll** — Backend tracks job status; stuck in-flight jobs older than 35 minutes are auto-failed on init.
+5. **Calendar** — Completed work can be scheduled as `calendar_events`.
+
+## External integrations
+
+- **APF** — product import, scrape/refresh, credentials surface
+- **ShadowCast** — hooks, content styles, generate/job execution, normalize enrichment
+- **Ollama** — model list/pull/running; analysis and script defaults in Settings
+
+## Operational constraints
+
+- Does **not** modify APF or ShadowCast codebases.
+- Shared `INTERNAL_SERVICE_SECRET` must match across all three repos.
+- Dashboard accuracy depends on APF / ShadowCast / Ollama uptime.
+- **Local-first:** SQLite + long polling — not suitable for serverless deploy.
+
+## Related docs
+
+- [RUNBOOK.md](RUNBOOK.md) — day-to-day ops
+- [LOCAL_STACK.md](LOCAL_STACK.md) — triple-repo bring-up
+- [RECOVERY.md](RECOVERY.md) — restore paths

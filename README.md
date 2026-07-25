@@ -4,11 +4,14 @@ A unified orchestration dashboard that sits on top of **ShadowCast** (video rend
 
 ## Operational docs
 
-- `docs/RECOVERY.md` — disaster-recovery playbook
-- `docs/RUNBOOK.md` — startup/shutdown and operations checks
-- `docs/LOCAL_STACK.md` — local triple-repo startup
-- `docs/SMOKE_TEST.md` — ecosystem smoke checklist
-- `docs/ARCHITECTURE.md` — architecture and data-flow reference
+- [CHANGELOG.md](CHANGELOG.md) — notable changes
+- [SETUP_POPOS.md](SETUP_POPOS.md) — full Pop!_OS / Razer Blade ecosystem setup
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — env vars and Settings surface
+- [docs/RECOVERY.md](docs/RECOVERY.md) — disaster-recovery playbook
+- [docs/RUNBOOK.md](docs/RUNBOOK.md) — startup/shutdown and operations checks
+- [docs/LOCAL_STACK.md](docs/LOCAL_STACK.md) — local triple-repo startup
+- [docs/SMOKE_TEST.md](docs/SMOKE_TEST.md) — ecosystem smoke checklist
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — architecture and data-flow reference
 
 ## Architecture
 
@@ -45,38 +48,47 @@ A unified orchestration dashboard that sits on top of **ShadowCast** (video rend
 ## Hardware Requirements
 
 Optimized for:
+
 - **GPU:** NVIDIA RTX 3080 (16GB VRAM) or equivalent
 - **RAM:** 32GB DDR4
 - **Storage:** NVMe SSD recommended for fast model loading
-- **OS:** Windows 10/11 or Ubuntu 22.04+
+- **OS:** Windows 10/11 or Ubuntu 22.04+ / Pop!_OS 22.04+
 
 ## Prerequisites
 
 1. **Python 3.10+** with pip
-2. **Node.js 18+** with npm
+2. **Node.js 18+** with **pnpm**
 3. **Ollama** installed and running (`ollama serve`)
-4. **ShadowCast** running on `localhost:8000`
-5. **APF** running on `localhost:3000`
+4. **ShadowCast** at `~/shadowcast-` running on `localhost:8000`
+5. **APF** at `~/APF` running on `localhost:3000`
 
 ## Quick Start
 
-### 1. Backend
+Preferred: bring up APF + ShadowCast + Mission Control together:
+
+```bash
+chmod +x scripts/start-ecosystem.sh
+./scripts/start-ecosystem.sh
+```
+
+Defaults: `APF_HOME=~/APF`, `SC_HOME=~/shadowcast-`, `MC_HOME` = this repo. Open **http://localhost:3100**.
+
+See [docs/LOCAL_STACK.md](docs/LOCAL_STACK.md) for one-time setup and secret wiring.
+
+### Mission Control only
+
+#### 1. Backend
 
 ```bash
 cd backend
 python -m venv venv
-
-# Linux/macOS
-source venv/bin/activate
-
-# Windows
-venv\Scripts\activate
-
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+cp .env.example .env       # set INTERNAL_SERVICE_SECRET to match APF + ShadowCast
 uvicorn main:app --host 0.0.0.0 --port 8100 --reload
 ```
 
-### 2. Frontend
+#### 2. Frontend
 
 ```bash
 cd frontend
@@ -84,9 +96,11 @@ pnpm install
 pnpm run dev
 ```
 
-### 3. Open Dashboard
+#### 3. Open Dashboard
 
 Navigate to **http://localhost:3100**
+
+Interactive API docs (FastAPI OpenAPI): **http://localhost:8100/docs**
 
 ## Ollama Setup
 
@@ -122,7 +136,7 @@ You can also pull models directly from the Mission Control dashboard under **Oll
 
 ## API Reference
 
-The backend exposes a REST API on port 8100:
+The backend exposes a REST API on port 8100 (also browsable at `/docs`):
 
 | Endpoint | Method | Description |
 |---|---|---|
@@ -162,6 +176,8 @@ The backend exposes a REST API on port 8100:
 | Default Hooks | `curiosity` |
 | Default Content Style | `honest_review` |
 
+Full env + Settings reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
 ## Operator Workflow
 
 1. **Scrape APF** — Product Pipeline → Scrape APF (per marketplace)
@@ -176,13 +192,14 @@ APF service-key auth uses `APF_USER_ID` (default `1`) so `products.list` returns
 
 ## Service Authentication
 
-Mission Control talks to APF and ShadowCast with `X-Service-Key` when **Internal Service Secret** is set. Use the same value everywhere:
+Mission Control talks to APF and ShadowCast with `X-Service-Key` when the internal service secret is set. Use the **same** value in all three repos.
 
-1. `INTERNAL_SERVICE_SECRET` in `~/APF/.env`
-2. Export before starting ShadowCast and MC backend
-3. Or set in MC Settings (seeded from `INTERNAL_SERVICE_SECRET` env on backend start)
+Two local mechanisms (either is fine; values must still match):
 
-Quick bring-up: `chmod +x scripts/start-ecosystem.sh && ./scripts/start-ecosystem.sh`
+1. **`backend/.env`** — copy from `backend/.env.example`; set `INTERNAL_SERVICE_SECRET`. Mirror the same value in `~/APF/.env` and `~/shadowcast-/backend/.env`.
+2. **`scripts/start-ecosystem.sh`** — if `INTERNAL_SERVICE_SECRET` is unset, reads or creates `MC_HOME/.service-secret` and exports it for APF, ShadowCast, and MC for that session.
+
+Settings also store the secret in SQLite (seeded from `INTERNAL_SERVICE_SECRET` on backend start when empty).
 
 ## Project Structure
 
@@ -191,9 +208,8 @@ mission-control/
 ├── backend/
 │   ├── main.py              # FastAPI orchestration server
 │   ├── requirements.txt     # Python dependencies
+│   ├── .env.example         # Secret / optional env template
 │   └── mission_control.db   # SQLite database (auto-created)
-├── scripts/
-│   └── start-ecosystem.sh   # Local bring-up for APF + ShadowCast + MC
 ├── frontend/
 │   ├── src/
 │   │   ├── components/      # Reusable UI components
@@ -205,6 +221,13 @@ mission-control/
 │   ├── package.json
 │   ├── vite.config.ts
 │   └── tailwind.config.js
+├── scripts/
+│   └── start-ecosystem.sh   # Local bring-up for APF + ShadowCast + MC
+├── docs/                    # Ops guides (runbook, recovery, architecture, …)
+├── tests/                   # Backend API tests
+├── .github/workflows/       # CI
+├── SETUP_POPOS.md           # Full machine setup
+├── CHANGELOG.md
 └── README.md
 ```
 
@@ -213,11 +236,14 @@ mission-control/
 | Issue | Solution |
 |---|---|
 | Ollama shows "Offline" | Run `ollama serve` in a terminal |
-| ShadowCast shows "Offline" | Start ShadowCast: `cd shadowcast && python app.py` |
-| APF shows "Offline" | Start APF: `cd apf && pnpm run dev` |
+| ShadowCast shows "Offline" | Start ShadowCast: `cd ~/shadowcast-/backend && source venv/bin/activate && python app.py` |
+| APF shows "Offline" | Start APF: `cd ~/APF && pnpm run dev` |
+| Port 3000 is not APF | Another app (e.g. Open WebUI) may own `:3000`; stop it or point APF / MC Settings at APF’s real port |
+| Empty APF import | Match `INTERNAL_SERVICE_SECRET`; ensure `APF_USER_ID=1` in APF |
 | Model pull fails | Check disk space and internet connection |
 | Video job fails | Check ShadowCast logs for render errors |
-| Port conflict | Change ports in Settings or vite.config.ts |
+| Job stuck after MC restart | Stuck jobs auto-fail after 35 minutes; delete and re-queue |
+| Port conflict | Change ports in Settings or `vite.config.ts` |
 
 ## License
 

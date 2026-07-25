@@ -2,6 +2,8 @@
 
 Run after starting the stack ([LOCAL_STACK.md](LOCAL_STACK.md)). Record pass/fail and date.
 
+Config and secret wiring: [CONFIGURATION.md](CONFIGURATION.md). Day-to-day ops: [RUNBOOK.md](RUNBOOK.md).
+
 ## 0. Preflight
 
 ```bash

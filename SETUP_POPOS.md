@@ -7,9 +7,14 @@
 
 ## Operational docs
 
-- `docs/RECOVERY.md` for machine-loss, working-tree, and SQLite recovery.
-- `docs/RUNBOOK.md` for startup/shutdown and service checks.
-- `docs/ARCHITECTURE.md` for component and integration mapping.
+- `README.md` — project overview and quick start
+- `CHANGELOG.md` — notable changes
+- `docs/CONFIGURATION.md` — env vars and Settings surface
+- `docs/RECOVERY.md` — machine-loss, working-tree, and SQLite recovery
+- `docs/RUNBOOK.md` — startup/shutdown and service checks
+- `docs/LOCAL_STACK.md` — triple-repo local bring-up
+- `docs/SMOKE_TEST.md` — ecosystem smoke checklist
+- `docs/ARCHITECTURE.md` — component and integration mapping
 
 ---
 
