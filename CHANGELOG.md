@@ -8,12 +8,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Command-center surfaces: APF enrich/bookmarks/daemon/refresh-runs, ShadowCast readiness/TTS/preset/partial/retry/audit, Publish + Ops pages, service registry, scheduler, optional `MC_DASHBOARD_TOKEN`
+- Child-app handoffs: `docs/handoff/SHADOWCAST_CHANGES.md`, `docs/handoff/APF_CHANGES.md`
 - `docs/CONFIGURATION.md` — single reference for env vars and SQLite Settings
 - `CHANGELOG.md`
 
 ### Changed
 
 - README, runbook, recovery, architecture, and local-stack docs aligned on pnpm, canonical paths (`~/APF`, `~/shadowcast-`), dual secret wiring (`.env` + `.service-secret`), and ecosystem script bring-up
+- Full 8 APF marketplaces in Products/Settings credentials
 
 ## [2026-07-22]
 

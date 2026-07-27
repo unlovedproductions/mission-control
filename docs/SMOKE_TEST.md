@@ -20,7 +20,17 @@ curl -sf localhost:8100/api/health && echo " MC OK"
 curl -sf localhost:8100/api/status/services | python3 -m json.tool
 ```
 
-Expected: APF, ShadowCast, Ollama reported in MC status (Ollama optional for connectivity-only smoke).
+Expected: APF, ShadowCast, Ollama, Digistore daemon reported in MC status (daemon/Ollama optional for connectivity-only smoke).
+
+## 1b. Command-center probes
+
+```bash
+curl -sf localhost:8100/api/apf/daemon | python3 -m json.tool
+curl -sf localhost:8100/api/apf/marketplaces | python3 -m json.tool
+curl -sf localhost:8100/api/shadowcast/readiness | python3 -m json.tool || echo "SC readiness optional if offline"
+curl -sf localhost:8100/api/ops/overview | python3 -m json.tool
+curl -sf localhost:8100/api/auth/status | python3 -m json.tool
+```
 
 ## 2. MC → APF import
 

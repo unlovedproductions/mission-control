@@ -12,6 +12,8 @@ A unified orchestration dashboard that sits on top of **ShadowCast** (video rend
 - [docs/LOCAL_STACK.md](docs/LOCAL_STACK.md) — local triple-repo startup
 - [docs/SMOKE_TEST.md](docs/SMOKE_TEST.md) — ecosystem smoke checklist
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — architecture and data-flow reference
+- [docs/handoff/SHADOWCAST_CHANGES.md](docs/handoff/SHADOWCAST_CHANGES.md) — ShadowCast APIs MC needs
+- [docs/handoff/APF_CHANGES.md](docs/handoff/APF_CHANGES.md) — APF APIs MC needs
 
 ## Architecture
 
@@ -38,12 +40,16 @@ A unified orchestration dashboard that sits on top of **ShadowCast** (video rend
 
 ## Features
 
-- **Product Pipeline** — Import affiliate products from APF, browse/filter/search, AI-analyze with Ollama
-- **Video Production Queue** — Send products to ShadowCast for script generation + video rendering, track job status
+- **Product Pipeline** — Import affiliate products from APF (8 marketplaces), browse/filter/search, queue enrichment, bookmarks, AI-analyze with Ollama
+- **Video Production Queue** — Send products to ShadowCast with preset/TTS, track job status including `partial`, retry-missing / audit
+- **Publish** — Proxy ShadowCast OAuth status, postable jobs, publish/schedule/queue (connect accounts in ShadowCast UI)
+- **Ops** — Service registry health, Digistore daemon, refresh runs, schedules, problem jobs
 - **Ollama Model Manager** — View installed models, pull new ones, see VRAM usage, hardware-optimized recommendations
-- **Content Calendar** — Monthly calendar view, schedule video publishes, track your YouTube pipeline
-- **Analytics Overview** — Pipeline funnel, marketplace breakdown, job completion rates, recent activity
-- **Settings** — Configure all API endpoints and default Ollama models
+- **Content Calendar** — Monthly calendar view; marking published can call ShadowCast schedule/publish
+- **Analytics Overview** — Pipeline funnel plus ShadowCast hook/format/revenue proxies
+- **Settings** — Configure API endpoints, default models, APF credentials
+
+Child-app gaps that need APF/ShadowCast code: [docs/handoff/](docs/handoff/).
 
 ## Hardware Requirements
 

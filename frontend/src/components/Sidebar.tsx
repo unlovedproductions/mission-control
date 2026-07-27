@@ -9,6 +9,8 @@ import {
   Settings,
   Activity,
   Zap,
+  Share2,
+  Server,
 } from 'lucide-react'
 
 const navItems = [
@@ -17,7 +19,9 @@ const navItems = [
   { to: '/jobs', icon: Video, label: 'Video Queue' },
   { to: '/models', icon: Brain, label: 'Ollama Models' },
   { to: '/calendar', icon: Calendar, label: 'Content Calendar' },
+  { to: '/publish', icon: Share2, label: 'Publish' },
   { to: '/analytics', icon: BarChart3, label: 'Analytics' },
+  { to: '/ops', icon: Server, label: 'Ops' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ]
 
@@ -62,7 +66,7 @@ export default function Sidebar() {
       <div className="p-4 border-t border-brand-border">
         <div className="flex items-center gap-2 text-xs text-brand-text-dim">
           <Activity className="w-3.5 h-3.5" />
-          <span>v1.0.0 — Local Dev</span>
+          <span>v1.1.0 — Local Dev</span>
         </div>
       </div>
     </aside>

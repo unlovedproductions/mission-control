@@ -71,3 +71,63 @@ def test_concurrent_job_limit(client):
         json={"product_id": "prod-x", "job_type": "short"},
     )
     assert r.status_code == 429
+
+
+def test_marketplaces_and_auth_status(client):
+    r = client.get("/api/apf/marketplaces")
+    assert r.status_code == 200
+    markets = r.json()["marketplaces"]
+    assert "clickbank" in markets
+    assert "amazon" in markets
+    assert len(markets) == 8
+
+    auth = client.get("/api/auth/status")
+    assert auth.status_code == 200
+    assert "required" in auth.json()
+
+
+def test_ops_overview_shape(client):
+    r = client.get("/api/ops/overview")
+    assert r.status_code == 200
+    data = r.json()
+    assert "services" in data
+    assert "schedules" in data
+    assert "refresh_runs" in data
+    assert "problem_jobs" in data
+    names = {s["name"] for s in data["services"]}
+    assert "shadowcast" in names
+    assert "apf" in names
+
+
+def test_services_registry_health(client):
+    r = client.get("/api/status/services")
+    assert r.status_code == 200
+    data = r.json()
+    assert "shadowcast" in data
+    assert "apf" in data
+    assert "status" in data["shadowcast"]
+    assert "ui_url" in data["shadowcast"]
+
+
+def test_refresh_runs_endpoint(client):
+    r = client.get("/api/apf/refresh-runs/latest")
+    assert r.status_code == 200
+    assert "runs" in r.json()
+
+
+def test_dashboard_token_gate(monkeypatch, tmp_path):
+    """When MC_DASHBOARD_TOKEN is set, protected routes require the header."""
+    import main as main_mod
+    from fastapi.testclient import TestClient
+
+    main_mod.MC_DASHBOARD_TOKEN = "test-dash-token"
+    try:
+        with TestClient(main_mod.app) as c:
+            denied = c.get("/api/config")
+            assert denied.status_code == 401
+            ok = c.get("/api/config", headers={"X-Dashboard-Token": "test-dash-token"})
+            assert ok.status_code == 200
+            health = c.get("/api/health")
+            assert health.status_code == 200
+    finally:
+        main_mod.MC_DASHBOARD_TOKEN = ""

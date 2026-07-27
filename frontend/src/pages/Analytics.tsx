@@ -22,12 +22,26 @@ interface Stats {
 export default function Analytics() {
   const [stats, setStats] = useState<Stats | null>(null)
   const [loading, setLoading] = useState(true)
+  const [scDash, setScDash] = useState<any>(null)
+  const [scHooks, setScHooks] = useState<any>(null)
+  const [scFormats, setScFormats] = useState<any>(null)
+  const [scRevenue, setScRevenue] = useState<any>(null)
 
   const fetchStats = async () => {
     setLoading(true)
     try {
       const data = await api.analyticsOverview()
       setStats(data)
+      const [d, h, f, r] = await Promise.all([
+        api.scAnalyticsDashboard().catch(() => null),
+        api.scAnalyticsHooks().catch(() => null),
+        api.scAnalyticsFormats().catch(() => null),
+        api.scAnalyticsRevenue().catch(() => null),
+      ])
+      setScDash(d)
+      setScHooks(h)
+      setScFormats(f)
+      setScRevenue(r)
     } catch (e) {
       console.error(e)
     } finally {
@@ -208,6 +222,43 @@ export default function Analytics() {
               </div>
             )
           })}
+        </div>
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="card">
+          <h3 className="text-sm font-semibold text-brand-text-dim uppercase tracking-wider mb-3 flex items-center gap-2">
+            <TrendingUp className="w-4 h-4" /> ShadowCast dashboard
+          </h3>
+          {scDash ? (
+            <pre className="text-xs overflow-auto max-h-56 text-brand-text-dim">{JSON.stringify(scDash, null, 2)}</pre>
+          ) : (
+            <p className="text-sm text-brand-text-dim">Unavailable (ShadowCast offline or empty)</p>
+          )}
+        </div>
+        <div className="card">
+          <h3 className="text-sm font-semibold text-brand-text-dim uppercase tracking-wider mb-3">Revenue</h3>
+          {scRevenue ? (
+            <pre className="text-xs overflow-auto max-h-56 text-brand-text-dim">{JSON.stringify(scRevenue, null, 2)}</pre>
+          ) : (
+            <p className="text-sm text-brand-text-dim">Unavailable</p>
+          )}
+        </div>
+        <div className="card">
+          <h3 className="text-sm font-semibold text-brand-text-dim uppercase tracking-wider mb-3">Hooks performance</h3>
+          {scHooks ? (
+            <pre className="text-xs overflow-auto max-h-56 text-brand-text-dim">{JSON.stringify(scHooks, null, 2)}</pre>
+          ) : (
+            <p className="text-sm text-brand-text-dim">Unavailable</p>
+          )}
+        </div>
+        <div className="card">
+          <h3 className="text-sm font-semibold text-brand-text-dim uppercase tracking-wider mb-3">Formats performance</h3>
+          {scFormats ? (
+            <pre className="text-xs overflow-auto max-h-56 text-brand-text-dim">{JSON.stringify(scFormats, null, 2)}</pre>
+          ) : (
+            <p className="text-sm text-brand-text-dim">Unavailable</p>
+          )}
         </div>
       </div>
     </div>

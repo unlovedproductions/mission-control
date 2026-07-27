@@ -20,8 +20,19 @@ Secrets belong in env files. Service URLs and model defaults live in SQLite Sett
 | `MC_DB_PATH` | No | `backend/mission_control.db` | SQLite file path |
 | `MC_MAX_CONCURRENT_JOBS` | No | `2` | Parallel video jobs |
 | `MC_CORS_ORIGINS` | No | `http://localhost:3100,http://127.0.0.1:3100` | Comma-separated CORS origins |
+| `MC_DASHBOARD_TOKEN` | No | empty | When set, all `/api/*` except health/auth require `X-Dashboard-Token` or `Authorization: Bearer` |
 
 On backend start, if Settings has an empty `internal_service_secret` and the env var is set, the env value is seeded into SQLite.
+
+## Service registry & schedules
+
+SQLite tables (seeded on start):
+
+| Table | Purpose |
+|-------|---------|
+| `services` | Health probes for ShadowCast, APF, Ollama, Digistore daemon (`GET /api/status/services`, Ops UI) |
+| `schedules` | Background jobs: `apf_refresh`, `apf_enrich`, `sc_queue_process` (disabled by default; toggle on Ops) |
+| `refresh_runs` | Local scrape outcome log (until APF exposes refresh logs — see [handoff/APF_CHANGES.md](handoff/APF_CHANGES.md)) |
 
 ## SQLite Settings (`DEFAULT_CONFIG`)
 
