@@ -92,4 +92,4 @@ Then run the import/job steps in [SMOKE_TEST.md](SMOKE_TEST.md) when the full st
 ## 11) Last Verified
 
 - Date: 2026-07-25
-- Basis: documentation accuracy pass against main (`f00661d`) plus this docs refresh
+- Commit: `f311c43` (docs refresh; later command-center docs in `ceb3789`)
