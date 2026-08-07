@@ -1,55 +1,56 @@
-# ShadowCast — Changes Required for Mission Control
+# ShadowCast — Alignment with Mission Control
 
-Mission Control does **not** modify this repo. Implement the items below in `~/shadowcast-` so MC can fully control render lifecycle and auth.
+Mission Control does **not** modify this repo. This document tracks ShadowCast contracts MC depends on.
 
-## 1. Cooperative job cancel (required)
+## 1. Cooperative job cancel — ALIGNED
 
-MC soft-cancels its own poller on `DELETE /api/jobs/{id}` and best-effort calls:
+ShadowCast exposes:
 
 ```http
-POST /api/jobs/{job_id}/cancel
-X-Service-Key: <INTERNAL_SERVICE_SECRET>
+POST /api/cancel/{job_id}
 ```
 
-### Contract
+Mission Control `DELETE /api/jobs/{id}` soft-cancels its poller and best-effort calls that route (not `/api/jobs/{id}/cancel`).
 
-**Request:** empty body (or `{}`). Path `job_id` is the ShadowCast job id returned from `POST /api/generate`.
-
-**Response `200`:**
+**Response `200` examples:**
 
 ```json
-{
-  "status": "cancelled",
-  "job_id": "<uuid>",
-  "message": "Cancel requested"
-}
+{ "job_id": "<uuid>", "status": "cancelling", "message": "Cancel requested. Worker stops at the next checkpoint." }
 ```
 
-**Response `404`:** unknown job.
+or terminal:
 
-**Response `409`:** job already terminal (`complete` / `partial` / `error` / `cancelled`).
+```json
+{ "job_id": "<uuid>", "status": "complete|cancelled|error", "message": "Job is not running" }
+```
 
-### Implementation notes
+**`404`:** unknown job.
 
-1. Add a `cancelled: bool` (or `status = "cancelled"`) flag on the in-memory job record and persist it to `backend/output/{job_id}/job.json`.
-2. In `_run_generation` / `_run_single_product`, check the flag **between** hook × format iterations (cooperative). An in-flight single MoviePy render may finish; do not kill mid-encode unless you already have safe interrupt hooks.
-3. When cancelled, stop further hooks/formats, mark job `cancelled`, leave any partial artifacts on disk, and return that status from `GET /api/status/{job_id}`.
-4. Gate the route with the same service-key middleware used for `POST /api/config` when `INTERNAL_SERVICE_SECRET` is set.
+MC treats HTTP 200/201/204 as `shadowcast_cancel_ok: true` and surfaces failures in the Jobs UI.
 
-### Where MC calls it
+Job statuses MC maps: `running` → in progress; `complete` → `completed`; `partial` → `partial`; `cancelled`/`cancelling` → `cancelled`; `error` → failed.
 
-[`mission-control/backend/main.py`](../../backend/main.py) — `delete_job` posts to `/api/jobs/{sc_job_id}/cancel` after reading `shadowcast_job_id` from `video_jobs.script_json`. Today a missing endpoint is swallowed (`shadowcast_cancel_ok: false`).
+## 2. Publish / schedule contracts — ALIGNED (MC side)
 
-## 2. Align service-key middleware with OpenAPI (recommended)
+| ShadowCast route | Required fields MC sends |
+|------------------|--------------------------|
+| `POST /api/publish` | `job_id`, `hook_type`, `platform`, `video_format`, optional `product_slug`, `dry_run` |
+| `POST /api/publish/batch` | `job_id`, `hook_type`, `platforms[]`, `video_format` (one variant → many platforms) |
+| `POST /api/social/schedule` | `platform`, `scheduled_time`, optional `job_id`/`hook_type`/`video_format`/`caption`/`hashtags` |
+| `GET /api/jobs/postable` | Returns jobs with `variants[]` (hook/format/slug) used by Publish UI |
 
-OpenAPI documents `ServiceKeyAuth` on many routes, but runtime middleware largely allowlists non-GET job/publish/analytics routes as public. Either:
+Connect OAuth in ShadowCast UI. Set `MC_DASHBOARD_TOKEN` before live Publish.
+
+## 3. Align service-key middleware with OpenAPI (recommended)
+
+OpenAPI documents `ServiceKeyAuth` on many routes, but runtime middleware largely allowlists non-GET job/publish/analytics routes as public (`backend/auth_public_routes.py`). Either:
 
 - tighten the allowlist so generate/publish/retry require `X-Service-Key` when the secret is set, **or**
 - update OpenAPI to match the public allowlist.
 
-Mission Control already sends `X-Service-Key` on generate, config, publish, and retry-missing.
+Mission Control already sends `X-Service-Key` on generate, config, publish, cancel, and retry-missing.
 
-## 3. Optional niceties (not blocking)
+## 4. Optional niceties (not blocking)
 
 | Item | Why |
 |------|-----|
@@ -59,4 +60,4 @@ Mission Control already sends `X-Service-Key` on generate, config, publish, and 
 
 ## Out of scope for ShadowCast
 
-OAuth connect UI stays in ShadowCast. MC only proxies status + publish/schedule/queue.
+OAuth connect UI stays in ShadowCast. MC proxies status + publish/schedule/queue/process.

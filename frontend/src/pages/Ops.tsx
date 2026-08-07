@@ -47,6 +47,9 @@ export default function Ops() {
         <div>
           <h1 className="text-2xl font-bold">Ops</h1>
           <p className="text-brand-text-dim text-sm mt-1">Service registry, readiness, refresh runs, problem jobs</p>
+          <p className="text-xs text-brand-warning mt-1">
+            Digistore daemon is probed at :3219 directly (APF stopgap). Refresh runs are local until APF ships products.refreshLogs.
+          </p>
         </div>
         <button onClick={load} className="btn-secondary flex items-center gap-2">
           <RefreshCw className="w-4 h-4" /> Refresh
@@ -88,6 +91,7 @@ export default function Ops() {
             </div>
             <div className="card">
               <h2 className="text-sm font-semibold mb-2">Digistore daemon</h2>
+              <p className="text-xs text-brand-text-dim mb-2">Direct probe — not via APF system.digistoreDaemon yet</p>
               {daemon ? (
                 <>
                   <StatusBadge status={daemon.status} />
@@ -125,6 +129,7 @@ export default function Ops() {
 
           <div className="card">
             <h2 className="text-sm font-semibold mb-3">Latest refresh runs</h2>
+            <p className="text-xs text-brand-text-dim mb-2">Local MC stopgap until APF products.refreshLogs exists</p>
             <div className="space-y-2">
               {(overview?.refresh_runs || []).length === 0 && (
                 <p className="text-sm text-brand-text-dim">No refresh runs recorded yet</p>

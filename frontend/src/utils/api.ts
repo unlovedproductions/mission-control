@@ -48,6 +48,7 @@ export const MARKETPLACES = [
   'awin',
   'impact',
   'amazon',
+  'rakuten',
 ] as const;
 
 export const api = {
@@ -183,13 +184,33 @@ export const api = {
 
   oauthStatus: () => request<any>('/publish/oauth/status'),
   postableJobs: () => request<any>('/publish/postable'),
-  publish: (body: Record<string, unknown>) =>
-    request<any>('/publish', { method: 'POST', body: JSON.stringify(body) }),
-  publishBatch: (body: Record<string, unknown>) =>
-    request<any>('/publish/batch', { method: 'POST', body: JSON.stringify(body) }),
+  publish: (body: {
+    job_id: string;
+    platform: string;
+    hook_type: string;
+    video_format?: string;
+    product_slug?: string;
+    dry_run?: boolean;
+  }) => request<any>('/publish', { method: 'POST', body: JSON.stringify(body) }),
+  publishBatch: (body: {
+    job_id: string;
+    hook_type: string;
+    platforms: string[];
+    video_format?: string;
+    product_slug?: string;
+    dry_run?: boolean;
+  }) => request<any>('/publish/batch', { method: 'POST', body: JSON.stringify(body) }),
   socialQueue: () => request<any>('/publish/social/queue'),
-  socialSchedule: (body: Record<string, unknown>) =>
-    request<any>('/publish/social/schedule', { method: 'POST', body: JSON.stringify(body) }),
+  socialSchedule: (body: {
+    job_id: string;
+    platform: string;
+    scheduled_time: string;
+    hook_type?: string;
+    video_format?: string;
+    caption?: string;
+    hashtags?: string[];
+    product_slug?: string;
+  }) => request<any>('/publish/social/schedule', { method: 'POST', body: JSON.stringify(body) }),
   socialQueueProcess: (dryRun = false) =>
     request<any>(`/publish/social/queue/process?dry_run=${dryRun}`, { method: 'POST' }),
   scAnalyticsDashboard: () => request<any>('/publish/analytics/dashboard'),

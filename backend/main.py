@@ -40,6 +40,7 @@ MARKETPLACES = [
     "awin",
     "impact",
     "amazon",
+    "rakuten",
 ]
 
 # ── App Setup ─────────────────────────────────────────────────────────
@@ -1693,6 +1694,20 @@ async def run_video_job(job_id: str):
                 log_activity("job_partial", f"Job {job_id} for {product['name']}")
                 return
 
+            elif sc_status in ("cancelled", "cancelling"):
+                conn.execute(
+                    """UPDATE video_jobs SET status = 'cancelled',
+                       error_message = ?, script_json = ? WHERE id = ?""",
+                    (
+                        status_data.get("message") or "Cancelled in ShadowCast",
+                        _json_dumps(progress_meta),
+                        job_id,
+                    ),
+                )
+                conn.commit()
+                log_activity("job_cancelled", f"Job {job_id} for {product['name']}")
+                return
+
             elif sc_status == "error":
                 errors = status_data.get("errors", ["Unknown error"])
                 raise Exception(f"ShadowCast error: {'; '.join(errors)}")
@@ -1731,7 +1746,7 @@ async def get_job(job_id: str):
 
 @app.delete("/api/jobs/{job_id}")
 async def delete_job(job_id: str):
-    """Soft-cancel MC poller; best-effort ShadowCast cancel if endpoint exists."""
+    """Soft-cancel MC poller; best-effort ShadowCast POST /api/cancel/{job_id}."""
     _cancelled_jobs.add(job_id)
     conn = get_db()
     job = conn.execute("SELECT * FROM video_jobs WHERE id = ?", (job_id,)).fetchone()
@@ -1752,24 +1767,31 @@ async def delete_job(job_id: str):
 
     cancel_attempted = False
     cancel_ok = False
+    cancel_detail = None
     if sc_job_id:
         cancel_attempted = True
         config = get_config()
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 r = await client.post(
-                    f"{config['shadowcast_url']}/api/jobs/{sc_job_id}/cancel",
+                    f"{config['shadowcast_url']}/api/cancel/{sc_job_id}",
                     headers=_service_headers(config),
                 )
                 cancel_ok = r.status_code in (200, 201, 204)
-        except Exception:
+                try:
+                    cancel_detail = r.json()
+                except Exception:
+                    cancel_detail = {"status_code": r.status_code, "text": r.text[:200]}
+        except Exception as e:
             cancel_ok = False
+            cancel_detail = {"error": str(e)}
 
     return {
         "status": "deleted",
         "cancelled": True,
         "shadowcast_cancel_attempted": cancel_attempted,
         "shadowcast_cancel_ok": cancel_ok,
+        "shadowcast_cancel_detail": cancel_detail,
     }
 
 
@@ -1843,26 +1865,55 @@ async def update_calendar_status(event_id: str, status: str):
     if status == "published" and event["shadowcast_job_id"]:
         config = get_config()
         platform = event["publish_target"] or event["platform"] or "youtube"
+        sc_job_id = event["shadowcast_job_id"]
+        hook_type = "curiosity"
+        video_format = "short_form"
+        product_slug = None
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
+                # Prefer variant metadata from ShadowCast postable listing
+                try:
+                    pr = await client.get(f"{config['shadowcast_url']}/api/jobs/postable")
+                    if pr.status_code == 200:
+                        jobs = pr.json().get("jobs") or []
+                        match = next((j for j in jobs if j.get("job_id") == sc_job_id), None)
+                        variants = (match or {}).get("variants") or []
+                        if variants:
+                            hook_type = variants[0].get("hook_type") or hook_type
+                            video_format = variants[0].get("video_format") or video_format
+                            product_slug = variants[0].get("product_slug") or None
+                except Exception:
+                    pass
+
                 # Prefer schedule when a future date is set; otherwise publish now
-                body = {
-                    "job_id": event["shadowcast_job_id"],
+                schedule_body = {
+                    "job_id": sc_job_id,
                     "platform": platform,
-                    "scheduled_at": event["scheduled_date"],
+                    "scheduled_time": event["scheduled_date"],
+                    "hook_type": hook_type,
+                    "video_format": video_format,
+                    "caption": event["title"] or "",
+                    "hashtags": [],
                 }
+                if product_slug:
+                    schedule_body["product_slug"] = product_slug
                 r = await client.post(
                     f"{config['shadowcast_url']}/api/social/schedule",
-                    json=body,
+                    json=schedule_body,
                     headers=_service_headers(config),
                 )
                 if r.status_code not in (200, 201):
+                    publish_body = {
+                        "job_id": sc_job_id,
+                        "platform": platform,
+                        "hook_type": hook_type,
+                        "video_format": video_format,
+                    }
+                    if product_slug:
+                        publish_body["product_slug"] = product_slug
                     r = await client.post(
                         f"{config['shadowcast_url']}/api/publish",
-                        json={
-                            "job_id": event["shadowcast_job_id"],
-                            "platform": platform,
-                        },
+                        json=publish_body,
                         headers=_service_headers(config),
                     )
                 if r.status_code in (200, 201):

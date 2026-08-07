@@ -4,6 +4,10 @@ Mission Control does **not** modify this repo. Implement the items below in `~/A
 
 MC already drives (via `X-Service-Key`): `products.list|search|refresh|shadowCastPayload|queueEnrichment|getDetail`, `credentials.*`, `bookmarks.*`, and probes Digistore daemon `http://127.0.0.1:3219/health` directly.
 
+**Marketplaces (APF `PLATFORM_VALUES`, 9):** `warriorplus`, `digistore24`, `clickbank`, `shareasale`, `cj`, `awin`, `impact`, `amazon`, `rakuten`.
+
+Still missing as of 2026-08 (verified against `~/APF`): `products.refreshLogs`, `system.digistoreDaemon`, `products.enrichmentQueue` / `enrichmentStatus`.
+
 ## 1. Refresh history reader (required)
 
 `data_refresh_logs` is written during `products.refresh` but has no tRPC reader. MC keeps a local `refresh_runs` table as a stopgap.

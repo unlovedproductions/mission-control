@@ -8,15 +8,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Publish UI: postable **variants**, multi-platform batch, schedule datetime (ShadowCast contracts)
+- Calendar **Mark published** wired to ShadowCast schedule/publish
+- Ninth APF marketplace: `rakuten`
+- Job cancel honesty: surface ShadowCast cancel success/failure; poller maps `cancelled`/`cancelling`
+
+### Changed
+
+- ShadowCast cancel path fixed to `POST /api/cancel/{job_id}` (was wrong `/api/jobs/{id}/cancel`)
+- Publish proxies aligned with SC `hook_type` / `platforms[]` / `scheduled_time`
+- Docs/handoffs updated for live APF (9 markets; 3 tRPC gaps remain) and ShadowCast cancel/publish alignment
+- Ops/Products UI labels for APF stopgaps (daemon probe, local refresh_runs, enrich fire-and-forget)
+
+### Added (prior)
+
 - Command-center surfaces: APF enrich/bookmarks/daemon/refresh-runs, ShadowCast readiness/TTS/preset/partial/retry/audit, Publish + Ops pages, service registry, scheduler, optional `MC_DASHBOARD_TOKEN`
 - Child-app handoffs: `docs/handoff/SHADOWCAST_CHANGES.md`, `docs/handoff/APF_CHANGES.md`
 - `docs/CONFIGURATION.md` — single reference for env vars and SQLite Settings
 - `CHANGELOG.md`
 
-### Changed
+### Changed (prior)
 
 - README, runbook, recovery, architecture, and local-stack docs aligned on pnpm, canonical paths (`~/APF`, `~/shadowcast-`), dual secret wiring (`.env` + `.service-secret`), and ecosystem script bring-up
-- Full 8 APF marketplaces in Products/Settings credentials
+- Full APF marketplace credentials in Products/Settings
 
 ## [2026-07-22]
 

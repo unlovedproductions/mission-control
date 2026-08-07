@@ -1,4 +1,10 @@
-"""ShadowCast publish / OAuth / social queue / analytics proxies."""
+"""ShadowCast publish / OAuth / social queue / analytics proxies.
+
+Payloads match ShadowCast contracts in ~/shadowcast-/backend/app.py:
+- POST /api/publish requires job_id + hook_type + platform
+- POST /api/publish/batch is one job across platforms[]
+- POST /api/social/schedule uses scheduled_time (not scheduled_at)
+"""
 
 from typing import Any, Dict, List, Optional
 
@@ -12,24 +18,36 @@ router = APIRouter(tags=["publish"])
 class PublishRequest(BaseModel):
     job_id: str
     platform: str = "youtube"
+    hook_type: str = "curiosity"
+    video_format: str = "short_form"
+    product_slug: Optional[str] = None
     dry_run: bool = False
-    title: Optional[str] = None
-    description: Optional[str] = None
+    thumbnail_variant: str = "variant_a"
     extra: Dict[str, Any] = Field(default_factory=dict)
 
 
 class PublishBatchRequest(BaseModel):
-    job_ids: List[str]
-    platform: str = "youtube"
+    job_id: str
+    hook_type: str
+    platforms: List[str]
+    video_format: str = "short_form"
+    product_slug: Optional[str] = None
     dry_run: bool = False
+    thumbnail_variant: str = "variant_a"
 
 
 class SocialScheduleRequest(BaseModel):
     job_id: str
     platform: str
+    scheduled_time: str
+    hook_type: Optional[str] = None
+    video_format: str = "short_form"
+    caption: str = ""
+    hashtags: List[str] = Field(default_factory=list)
+    product_slug: Optional[str] = None
+    video_path: Optional[str] = None
+    # Backward-compat alias from older MC clients
     scheduled_at: Optional[str] = None
-    dry_run: bool = False
-    payload: Dict[str, Any] = Field(default_factory=dict)
 
 
 async def _sc_get(path: str, timeout: float = 15.0):
@@ -81,13 +99,15 @@ async def publish_one(req: PublishRequest):
     body = {
         "job_id": req.job_id,
         "platform": req.platform,
+        "hook_type": req.hook_type,
+        "video_format": req.video_format,
         "dry_run": req.dry_run,
-        **({"title": req.title} if req.title else {}),
-        **({"description": req.description} if req.description else {}),
+        "thumbnail_variant": req.thumbnail_variant,
+        **({"product_slug": req.product_slug} if req.product_slug else {}),
         **req.extra,
     }
     result = await _sc_post("/api/publish", body)
-    log_activity("publish", f"{req.platform}:{req.job_id}")
+    log_activity("publish", f"{req.platform}:{req.job_id}:{req.hook_type}")
     return result
 
 
@@ -95,15 +115,17 @@ async def publish_one(req: PublishRequest):
 async def publish_batch(req: PublishBatchRequest):
     from main import log_activity
 
-    result = await _sc_post(
-        "/api/publish/batch",
-        {
-            "job_ids": req.job_ids,
-            "platform": req.platform,
-            "dry_run": req.dry_run,
-        },
-    )
-    log_activity("publish_batch", f"{req.platform}:{len(req.job_ids)} jobs")
+    body = {
+        "job_id": req.job_id,
+        "hook_type": req.hook_type,
+        "video_format": req.video_format,
+        "platforms": req.platforms,
+        "dry_run": req.dry_run,
+        "thumbnail_variant": req.thumbnail_variant,
+        **({"product_slug": req.product_slug} if req.product_slug else {}),
+    }
+    result = await _sc_post("/api/publish/batch", body)
+    log_activity("publish_batch", f"{req.job_id}:{','.join(req.platforms)}")
     return result
 
 
@@ -116,12 +138,20 @@ async def social_queue():
 async def social_schedule(req: SocialScheduleRequest):
     from main import log_activity
 
+    scheduled_time = req.scheduled_time or req.scheduled_at
+    if not scheduled_time:
+        raise HTTPException(status_code=400, detail="scheduled_time is required")
+
     body = {
         "job_id": req.job_id,
         "platform": req.platform,
-        "dry_run": req.dry_run,
-        **({"scheduled_at": req.scheduled_at} if req.scheduled_at else {}),
-        **req.payload,
+        "scheduled_time": scheduled_time,
+        "caption": req.caption,
+        "hashtags": req.hashtags,
+        "video_format": req.video_format,
+        **({"hook_type": req.hook_type} if req.hook_type else {}),
+        **({"product_slug": req.product_slug} if req.product_slug else {}),
+        **({"video_path": req.video_path} if req.video_path else {}),
     }
     result = await _sc_post("/api/social/schedule", body)
     log_activity("social_schedule", f"{req.platform}:{req.job_id}")
@@ -130,11 +160,22 @@ async def social_schedule(req: SocialScheduleRequest):
 
 @router.post("/api/publish/social/queue/process")
 async def social_queue_process(dry_run: bool = False):
-    from main import log_activity
+    from main import _service_headers, get_config, log_activity
 
-    result = await _sc_post("/api/social/queue/process", {"dry_run": dry_run})
+    config = get_config()
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        r = await client.post(
+            f"{config['shadowcast_url']}/api/social/queue/process",
+            params={"dry_run": dry_run},
+            headers=_service_headers(config),
+        )
+    if r.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=502,
+            detail=f"ShadowCast queue process failed: {r.status_code} {r.text[:200]}",
+        )
     log_activity("social_queue_process", f"dry_run={dry_run}")
-    return result
+    return r.json()
 
 
 @router.get("/api/publish/analytics/dashboard")

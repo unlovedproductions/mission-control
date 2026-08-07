@@ -22,6 +22,9 @@ curl -sf localhost:8100/api/status/services | python3 -m json.tool
 
 Expected: APF, ShadowCast, Ollama, Digistore daemon reported in MC status (daemon/Ollama optional for connectivity-only smoke).
 
+ShadowCast cancel path used by MC: `POST /api/cancel/{job_id}` (not `/api/jobs/{id}/cancel`).
+Publish requires `hook_type` from postable variants. APF still lacks `refreshLogs` / `digistoreDaemon` / `enrichmentQueue` — see [handoff/APF_CHANGES.md](handoff/APF_CHANGES.md).
+
 ## 1b. Command-center probes
 
 ```bash

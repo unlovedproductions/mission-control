@@ -271,6 +271,9 @@ export default function Products() {
         <div>
           <h1 className="text-2xl font-bold">Product Pipeline</h1>
           <p className="text-brand-text-dim text-sm mt-1">Scrape APF → import → enrich → approve → render</p>
+          <p className="text-xs text-brand-text-dim mt-1">
+            Enrichment queue is fire-and-forget until APF exposes products.enrichmentQueue. 9 APF marketplaces.
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <select className="input-field text-sm" value={importMarketplace} onChange={(e) => setImportMarketplace(e.target.value)}>

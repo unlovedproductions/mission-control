@@ -20,6 +20,7 @@ const statusStyles: Record<string, string> = {
   scheduled: 'badge-info',
   published: 'badge-success',
   cancelled: 'badge-neutral',
+  cancelling: 'badge-warning',
   interested: 'badge-info',
   researching: 'badge-warning',
   promoting: 'badge-success',

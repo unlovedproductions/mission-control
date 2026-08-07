@@ -17,6 +17,7 @@ MARKETPLACES = [
     "awin",
     "impact",
     "amazon",
+    "rakuten",
 ]
 
 DIGISTORE_DAEMON_URL = "http://127.0.0.1:3219"

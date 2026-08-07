@@ -84,9 +84,14 @@ export default function Jobs() {
   }, [jobs])
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Cancel/delete this job? Soft-cancels MC poller; best-effort ShadowCast cancel.')) return
+    if (!confirm('Cancel/delete this job? Soft-cancels MC poller and calls ShadowCast POST /api/cancel/{id}.')) return
     try {
-      await api.deleteJob(id)
+      const result = await api.deleteJob(id)
+      if (result?.shadowcast_cancel_attempted && !result?.shadowcast_cancel_ok) {
+        alert('MC job removed, but ShadowCast cancel failed. Check ShadowCast logs.')
+      } else if (result?.shadowcast_cancel_ok) {
+        alert('MC job removed; ShadowCast cancel acknowledged.')
+      }
       await fetchJobs()
     } catch (e: any) {
       alert(`Delete failed: ${e.message}`)

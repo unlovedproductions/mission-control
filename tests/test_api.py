@@ -79,7 +79,8 @@ def test_marketplaces_and_auth_status(client):
     markets = r.json()["marketplaces"]
     assert "clickbank" in markets
     assert "amazon" in markets
-    assert len(markets) == 8
+    assert len(markets) == 9
+    assert "rakuten" in markets
 
     auth = client.get("/api/auth/status")
     assert auth.status_code == 200

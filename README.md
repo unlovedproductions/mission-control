@@ -40,14 +40,14 @@ A unified orchestration dashboard that sits on top of **ShadowCast** (video rend
 
 ## Features
 
-- **Product Pipeline** — Import affiliate products from APF (8 marketplaces), browse/filter/search, queue enrichment, bookmarks, AI-analyze with Ollama
-- **Video Production Queue** — Send products to ShadowCast with preset/TTS, track job status including `partial`, retry-missing / audit
-- **Publish** — Proxy ShadowCast OAuth status, postable jobs, publish/schedule/queue (connect accounts in ShadowCast UI)
-- **Ops** — Service registry health, Digistore daemon, refresh runs, schedules, problem jobs
+- **Product Pipeline** — Import affiliate products from APF (**9 marketplaces**), browse/filter/search, queue enrichment, bookmarks, AI-analyze with Ollama
+- **Video Production Queue** — Send products to ShadowCast with preset/TTS, track `partial`/`cancelled`, retry-missing / audit, cancel via ShadowCast `POST /api/cancel/{id}`
+- **Publish** — Postable **variants** (hook × format), publish / multi-platform batch, schedule, queue process; OAuth connect stays in ShadowCast
+- **Ops** — Service registry health, Digistore daemon probe (`:3219` stopgap), local refresh runs, schedules, problem jobs
 - **Ollama Model Manager** — View installed models, pull new ones, see VRAM usage, hardware-optimized recommendations
-- **Content Calendar** — Monthly calendar view; marking published can call ShadowCast schedule/publish
+- **Content Calendar** — Monthly calendar; **Mark published** calls ShadowCast schedule/publish for linked jobs
 - **Analytics Overview** — Pipeline funnel plus ShadowCast hook/format/revenue proxies
-- **Settings** — Configure API endpoints, default models, APF credentials
+- **Settings** — Configure API endpoints, default models, APF credentials (9 markets)
 
 Child-app gaps that need APF/ShadowCast code: [docs/handoff/](docs/handoff/).
 
@@ -147,24 +147,37 @@ The backend exposes a REST API on port 8100 (also browsable at `/docs`):
 | Endpoint | Method | Description |
 |---|---|---|
 | `/api/health` | GET | Health check |
+| `/api/auth/status` | GET | Whether `MC_DASHBOARD_TOKEN` gate is required |
+| `/api/auth/unlock` | POST | Unlock dashboard with token |
 | `/api/config` | GET/PUT | Read/update configuration |
-| `/api/status/services` | GET | Check ShadowCast, APF, Ollama status |
+| `/api/status/services` | GET | ShadowCast, APF, Ollama, Digistore daemon |
 | `/api/ollama/models` | GET | List installed Ollama models |
 | `/api/ollama/pull` | POST | Pull a new model |
 | `/api/ollama/running` | GET | Currently loaded models |
 | `/api/products` | GET | List imported products (filtered total) |
 | `/api/products/import` | POST | Import from APF (upsert by APF id) |
 | `/api/products/refresh` | POST | Trigger APF marketplace scrape |
-| `/api/products/search` | GET | Search APF products |
+| `/api/products/search` | GET | Search APF products (server-side APF search) |
 | `/api/products/{id}/reenrich` | POST | Re-fetch APF enrichment + ShadowCast normalize |
 | `/api/products/{id}/analyze` | POST | AI-analyze a product |
 | `/api/products/{id}/status` | PUT | Approve/reject product |
 | `/api/apf/credentials` | GET/PUT | Marketplace API key status / save |
+| `/api/apf/marketplaces` | GET | Nine APF platform ids |
+| `/api/apf/enrich` | POST | Queue APF enrichment (fire-and-forget) |
+| `/api/apf/bookmarks` | GET/POST/DELETE | Bookmark proxies |
+| `/api/apf/daemon` | GET | Digistore daemon `:3219` probe |
 | `/api/shadowcast/hooks` | GET | ShadowCast hook types |
 | `/api/shadowcast/content-styles` | GET | ShadowCast content styles |
-| `/api/jobs` | GET/POST | List/create video jobs (hooks, style, model) |
-| `/api/jobs/{id}` | GET/DELETE | Get/delete a job |
+| `/api/shadowcast/readiness` | GET | Render readiness / blockers |
+| `/api/shadowcast/tts-providers` | GET | TTS providers |
+| `/api/shadowcast/retry-missing/{id}` | POST | Retry missing outputs |
+| `/api/shadowcast/audit/{id}` | GET | Job audit |
+| `/api/jobs` | GET/POST | List/create video jobs (hooks, style, model, preset/TTS) |
+| `/api/jobs/{id}` | GET/DELETE | Get/delete; DELETE also `POST /api/cancel/{sc_id}` |
 | `/api/calendar` | GET/POST | List/create calendar events |
+| `/api/calendar/{id}/status` | PUT | Status flip; `published` → SC schedule/publish |
+| `/api/publish/*` | * | OAuth, postable, publish, batch, social schedule/queue, SC analytics |
+| `/api/ops/*` | * | Overview, services, schedules |
 | `/api/analytics/overview` | GET | Dashboard statistics |
 | `/api/activity` | GET | Activity log |
 
@@ -186,13 +199,15 @@ Full env + Settings reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## Operator Workflow
 
-1. **Scrape APF** — Product Pipeline → Scrape APF (per marketplace)
+1. **Scrape APF** — Product Pipeline → Scrape APF (per marketplace; Digistore needs daemon on `:3219`)
 2. **Import** — pulls `products.list` + `shadowCastPayload`, normalizes via ShadowCast
-3. **Review** — open product detail, check review brief + recommended style
-4. **Approve** — mark product approved before queuing video
-5. **Create job** — pick hooks, style, model; MC sets ShadowCast LLM config then `/api/generate`
-6. **Track** — Video Queue shows progress; download when complete
-7. **Schedule** — completed jobs → Add to Calendar
+3. **Enrich / bookmark** — optional APF enrich queue + bookmarks (no queue-depth UI until APF handoff APIs land)
+4. **Review / approve** — product detail → approve before queuing video
+5. **Create job** — hooks, style, model, preset/TTS; MC sets ShadowCast LLM config then `/api/generate`
+6. **Track** — Video Queue; retry-missing / audit on `partial`; cancel calls ShadowCast `/api/cancel/{id}`
+7. **Schedule** — completed/partial jobs → Calendar
+8. **Publish** — Publish page: pick postable variant → publish / batch platforms / schedule / process queue
+9. **Ops** — watch services, schedules, local refresh runs, problem jobs
 
 APF service-key auth uses `APF_USER_ID` (default `1`) so `products.list` returns scraped products.
 
@@ -212,27 +227,32 @@ Settings also store the secret in SQLite (seeded from `INTERNAL_SERVICE_SECRET` 
 ```
 mission-control/
 ├── backend/
-│   ├── main.py              # FastAPI orchestration server
-│   ├── requirements.txt     # Python dependencies
-│   ├── .env.example         # Secret / optional env template
-│   └── mission_control.db   # SQLite database (auto-created)
+│   ├── main.py                 # Core FastAPI orchestration
+│   ├── apf_control.py          # APF enrich/bookmarks/daemon/marketplaces
+│   ├── shadowcast_control.py   # Readiness/TTS/retry/audit
+│   ├── publish_control.py      # Publish/OAuth/social/analytics proxies
+│   ├── ops_control.py          # Ops overview/services/schedules
+│   ├── scheduler.py            # Background schedule runner
+│   ├── requirements.txt
+│   ├── .env.example
+│   └── mission_control.db
 ├── frontend/
 │   ├── src/
-│   │   ├── components/      # Reusable UI components
-│   │   ├── pages/           # Route pages
-│   │   ├── utils/           # API client
-│   │   ├── App.tsx          # Root component with routing
-│   │   ├── main.tsx         # Entry point
-│   │   └── index.css        # Tailwind + custom styles
+│   │   ├── components/
+│   │   ├── pages/              # Products, Jobs, Calendar, Publish, Ops, …
+│   │   ├── utils/api.ts
+│   │   ├── App.tsx
+│   │   ├── main.tsx
+│   │   └── index.css
 │   ├── package.json
 │   ├── vite.config.ts
 │   └── tailwind.config.js
 ├── scripts/
-│   └── start-ecosystem.sh   # Local bring-up for APF + ShadowCast + MC
-├── docs/                    # Ops guides (runbook, recovery, architecture, …)
-├── tests/                   # Backend API tests
-├── .github/workflows/       # CI
-├── SETUP_POPOS.md           # Full machine setup
+│   └── start-ecosystem.sh
+├── docs/                       # Ops + docs/handoff/ sibling contracts
+├── tests/
+├── .github/workflows/
+├── SETUP_POPOS.md
 ├── CHANGELOG.md
 └── README.md
 ```
