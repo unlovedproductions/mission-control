@@ -6,8 +6,10 @@ Secrets belong in env files. Service URLs and model defaults live in SQLite Sett
 
 | Source | What lives there |
 |--------|------------------|
-| `backend/.env` | `INTERNAL_SERVICE_SECRET`; optional `MC_*` overrides |
+| `backend/.env` | `INTERNAL_SERVICE_SECRET`; optional `MC_*` / `SENTRY_*` overrides |
 | `backend/.env.example` | Template — copy to `.env` |
+| `frontend/.env` | `VITE_SENTRY_DSN`; optional `VITE_SENTRY_ENVIRONMENT` |
+| `frontend/.env.example` | Template — copy to `.env` |
 | `$MC_HOME/.service-secret` | Fallback for `scripts/start-ecosystem.sh` when env secret is unset |
 | SQLite `config` table | URLs, default models, hooks/style, secret (via Settings / `/api/config`) |
 | Sibling repos | Same `INTERNAL_SERVICE_SECRET`; APF `APF_USER_ID` (default `1`) |
@@ -21,6 +23,8 @@ Secrets belong in env files. Service URLs and model defaults live in SQLite Sett
 | `MC_MAX_CONCURRENT_JOBS` | No | `2` | Parallel video jobs |
 | `MC_CORS_ORIGINS` | No | `http://localhost:3100,http://127.0.0.1:3100` | Comma-separated CORS origins |
 | `MC_DASHBOARD_TOKEN` | No | empty | When set, all `/api/*` except health/auth require `X-Dashboard-Token` or `Authorization: Bearer` |
+| `SENTRY_DSN` | No | empty | Backend Sentry DSN; when set, errors/traces/logs are sent |
+| `SENTRY_ENVIRONMENT` | No | `development` | Sentry environment tag |
 
 On backend start, if Settings has an empty `internal_service_secret` and the env var is set, the env value is seeded into SQLite.
 

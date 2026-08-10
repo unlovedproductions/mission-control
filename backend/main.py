@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 import sqlite3
 import time
 import uuid
+import sentry_sdk
 
 # ── Job lifecycle ───────────────────────────────────────────────────────
 _cancelled_jobs: set[str] = set()
@@ -42,6 +43,31 @@ MARKETPLACES = [
     "amazon",
     "rakuten",
 ]
+
+# ── Sentry ────────────────────────────────────────────────────────────
+_env_path = os.path.join(os.path.dirname(__file__), ".env")
+try:
+    with open(_env_path) as _ef:
+        for _line in _ef:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _, _v = _line.partition("=")
+            _k = _k.strip()
+            _v = _v.strip().strip("'\"")
+            if _k.startswith("SENTRY_") and _k not in os.environ:
+                os.environ[_k] = _v
+except FileNotFoundError:
+    pass
+
+_sentry_dsn = os.environ.get("SENTRY_DSN", "").strip()
+if _sentry_dsn:
+    sentry_sdk.init(
+        dsn=_sentry_dsn,
+        traces_sample_rate=1.0,
+        enable_logs=True,
+        environment=os.environ.get("SENTRY_ENVIRONMENT", "development"),
+    )
 
 # ── App Setup ─────────────────────────────────────────────────────────
 app = FastAPI(
