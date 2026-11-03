@@ -32,7 +32,7 @@ echo "Starting APF..."
 (
   cd "$APF_HOME"
   export INTERNAL_SERVICE_SECRET
-  npm run dev
+  pnpm run dev
 ) &
 APF_PID=$!
 
@@ -57,7 +57,7 @@ MC_PID=$!
 echo "Starting Mission Control frontend..."
 (
   cd "$MC_HOME/frontend"
-  npm run dev
+  pnpm run dev
 ) &
 FE_PID=$!
 

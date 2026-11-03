@@ -10,34 +10,107 @@ import httpx
 import asyncio
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import sqlite3
 import time
 import uuid
+import sentry_sdk
+
+# ── Job lifecycle ───────────────────────────────────────────────────────
+_cancelled_jobs: set[str] = set()
+MAX_CONCURRENT_JOBS = int(os.environ.get("MC_MAX_CONCURRENT_JOBS", "2"))
+MC_DASHBOARD_TOKEN = os.environ.get("MC_DASHBOARD_TOKEN", "").strip()
+CORS_ORIGINS = [
+    o.strip()
+    for o in os.environ.get(
+        "MC_CORS_ORIGINS",
+        "http://localhost:3100,http://127.0.0.1:3100",
+    ).split(",")
+    if o.strip()
+]
+
+MARKETPLACES = [
+    "warriorplus",
+    "digistore24",
+    "clickbank",
+    "shareasale",
+    "cj",
+    "awin",
+    "impact",
+    "amazon",
+    "rakuten",
+]
+
+# ── Sentry ────────────────────────────────────────────────────────────
+_env_path = os.path.join(os.path.dirname(__file__), ".env")
+try:
+    with open(_env_path) as _ef:
+        for _line in _ef:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _, _v = _line.partition("=")
+            _k = _k.strip()
+            _v = _v.strip().strip("'\"")
+            if _k.startswith("SENTRY_") and _k not in os.environ:
+                os.environ[_k] = _v
+except FileNotFoundError:
+    pass
+
+_sentry_dsn = os.environ.get("SENTRY_DSN", "").strip()
+if _sentry_dsn:
+    sentry_sdk.init(
+        dsn=_sentry_dsn,
+        traces_sample_rate=1.0,
+        enable_logs=True,
+        environment=os.environ.get("SENTRY_ENVIRONMENT", "development"),
+    )
 
 # ── App Setup ─────────────────────────────────────────────────────────
 app = FastAPI(
     title="Mission Control",
     description="Unloved Productions — Unified Dashboard for ShadowCast + APF",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def dashboard_auth_middleware(request: Request, call_next):
+    """Optional operator gate when MC_DASHBOARD_TOKEN is set."""
+    if not MC_DASHBOARD_TOKEN:
+        return await call_next(request)
+    path = request.url.path
+    open_paths = {"/api/health", "/api/auth/status", "/api/auth/unlock"}
+    if path in open_paths or not path.startswith("/api"):
+        return await call_next(request)
+    token = request.headers.get("X-Dashboard-Token", "").strip()
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip() or token
+    if token != MC_DASHBOARD_TOKEN:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return await call_next(request)
+
 # ── Configuration ─────────────────────────────────────────────────────
-DB_PATH = os.path.join(os.path.dirname(__file__), "mission_control.db")
+DB_PATH = os.environ.get(
+    "MC_DB_PATH",
+    os.path.join(os.path.dirname(__file__), "mission_control.db"),
+)
 
 DEFAULT_CONFIG = {
     "shadowcast_url": "http://localhost:8000",
-    "apf_url": "http://localhost:3001",
+    "apf_url": "http://localhost:3000",
     # Read internal service secret from environment to avoid hardcoding secrets
     "internal_service_secret": os.environ.get("INTERNAL_SERVICE_SECRET", ""),
     "ollama_url": "http://localhost:11434",
@@ -129,10 +202,43 @@ def init_db():
             details TEXT DEFAULT '',
             timestamp TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS refresh_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            marketplace TEXT NOT NULL,
+            status TEXT DEFAULT 'running',
+            started_at TEXT DEFAULT (datetime('now')),
+            finished_at TEXT DEFAULT '',
+            product_count INTEGER DEFAULT 0,
+            error TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS services (
+            name TEXT PRIMARY KEY,
+            base_url TEXT NOT NULL,
+            health_path TEXT DEFAULT '/api/health',
+            kind TEXT DEFAULT 'http',
+            ui_url TEXT DEFAULT '',
+            enabled INTEGER DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS schedules (
+            kind TEXT PRIMARY KEY,
+            interval_minutes INTEGER DEFAULT 60,
+            enabled INTEGER DEFAULT 0,
+            marketplace TEXT DEFAULT 'clickbank',
+            payload TEXT DEFAULT '{}',
+            last_run TEXT DEFAULT '',
+            last_status TEXT DEFAULT '',
+            last_detail TEXT DEFAULT ''
+        );
     """)
 
     _migrate_products_columns(conn)
     _migrate_video_jobs_columns(conn)
+    _migrate_calendar_columns(conn)
+    _seed_services(conn)
+    _seed_schedules(conn)
 
     # Seed default config
     for key, value in DEFAULT_CONFIG.items():
@@ -154,6 +260,14 @@ def init_db():
                 (env_secret,),
             )
 
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
+        CREATE INDEX IF NOT EXISTS idx_products_marketplace ON products(marketplace);
+        CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
+        CREATE INDEX IF NOT EXISTS idx_video_jobs_status ON video_jobs(status);
+        CREATE INDEX IF NOT EXISTS idx_calendar_scheduled ON calendar_events(scheduled_date);
+    """)
+
     _recover_stuck_jobs(conn)
     conn.commit()
     conn.close()
@@ -171,6 +285,24 @@ PRODUCT_ENRICHMENT_COLUMNS = [
 
 VIDEO_JOB_OPTION_COLUMNS = [
     ("job_options", "TEXT DEFAULT '{}'"),
+]
+
+CALENDAR_EXTRA_COLUMNS = [
+    ("shadowcast_job_id", "TEXT DEFAULT ''"),
+    ("publish_target", "TEXT DEFAULT ''"),
+]
+
+DEFAULT_SERVICES = [
+    ("shadowcast", "http://localhost:8000", "/api/health", "http", "http://localhost:8000"),
+    ("apf", "http://localhost:3000", "/api/health", "http", "http://localhost:3000"),
+    ("ollama", "http://localhost:11434", "/api/tags", "http", ""),
+    ("digistore_daemon", "http://127.0.0.1:3219", "/health", "http", ""),
+]
+
+DEFAULT_SCHEDULES = [
+    ("apf_refresh", 360, 0, "clickbank"),
+    ("apf_enrich", 120, 0, ""),
+    ("sc_queue_process", 30, 0, ""),
 ]
 
 STYLE_FROM_ANGLE = [
@@ -200,6 +332,34 @@ def _migrate_video_jobs_columns(conn):
     for name, col_def in VIDEO_JOB_OPTION_COLUMNS:
         if name not in existing:
             conn.execute(f"ALTER TABLE video_jobs ADD COLUMN {name} {col_def}")
+
+
+def _migrate_calendar_columns(conn):
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(calendar_events)").fetchall()}
+    for name, col_def in CALENDAR_EXTRA_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE calendar_events ADD COLUMN {name} {col_def}")
+
+
+def _seed_services(conn):
+    for name, base_url, health_path, kind, ui_url in DEFAULT_SERVICES:
+        conn.execute(
+            """INSERT OR IGNORE INTO services
+               (name, base_url, health_path, kind, ui_url, enabled)
+               VALUES (?, ?, ?, ?, ?, 1)""",
+            (name, base_url, health_path, kind, ui_url),
+        )
+    # Keep URLs in sync with config when seeding first time only (IGNORE handles that)
+
+
+def _seed_schedules(conn):
+    for kind, interval, enabled, marketplace in DEFAULT_SCHEDULES:
+        conn.execute(
+            """INSERT OR IGNORE INTO schedules
+               (kind, interval_minutes, enabled, marketplace)
+               VALUES (?, ?, ?, ?)""",
+            (kind, interval, enabled, marketplace),
+        )
 
 
 def _recover_stuck_jobs(conn):
@@ -479,6 +639,31 @@ async def _configure_shadowcast_llm(
         )
 
 
+def _apply_ai_analysis(product, product_info: dict) -> dict:
+    """Merge MC Ollama analysis into product_info for ShadowCast script context."""
+    analysis = (product["ai_analysis"] or "").strip() if product else ""
+    if not analysis:
+        return product_info
+    out = dict(product_info)
+    out["ai_analysis"] = analysis
+    prefix = out.get("unique_selling_point") or ""
+    mc_block = f"Mission Control analysis:\n{analysis}"
+    out["unique_selling_point"] = f"{prefix}\n\n{mc_block}".strip() if prefix else mc_block
+    return out
+
+
+def _is_job_cancelled(job_id: str) -> bool:
+    return job_id in _cancelled_jobs
+
+
+def _count_active_jobs(conn) -> int:
+    row = conn.execute(
+        """SELECT COUNT(*) as c FROM video_jobs
+           WHERE status IN ('queued', 'generating_script', 'rendering')"""
+    ).fetchone()
+    return int(row["c"])
+
+
 def _is_thin_product_info(info: dict) -> bool:
     """True when product_info lacks enrichment needed for quality videos."""
     if not isinstance(info, dict) or not info.get("product_name"):
@@ -713,6 +898,7 @@ class VideoJobCreate(BaseModel):
     use_tts: bool = False
     tts_provider: str = "auto"
     tts_voice: Optional[str] = None
+    video_preset: Optional[str] = None  # fast | medium | best (ShadowCast maps to ffmpeg)
 
 
 class CalendarEventCreate(BaseModel):
@@ -723,12 +909,32 @@ class CalendarEventCreate(BaseModel):
     product_id: str = ""
     video_job_id: str = ""
     platform: str = "youtube"
+    shadowcast_job_id: str = ""
+    publish_target: str = ""
 
 
 # ── Health & Config Endpoints ─────────────────────────────────────────
 @app.get("/api/health")
 async def health_check():
-    return {"status": "ok", "app": "Mission Control", "version": "1.0.0"}
+    return {"status": "ok", "app": "Mission Control", "version": "1.1.0"}
+
+
+@app.get("/api/auth/status")
+async def auth_status():
+    return {"required": bool(MC_DASHBOARD_TOKEN)}
+
+
+class UnlockBody(BaseModel):
+    token: str
+
+
+@app.post("/api/auth/unlock")
+async def auth_unlock(body: UnlockBody):
+    if not MC_DASHBOARD_TOKEN:
+        return {"ok": True, "required": False}
+    if body.token.strip() != MC_DASHBOARD_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return {"ok": True, "required": True}
 
 
 @app.get("/api/config")
@@ -754,42 +960,40 @@ async def update_config(update: ConfigUpdate):
 # ── Service Status Endpoints ──────────────────────────────────────────
 @app.get("/api/status/services")
 async def check_services():
+    """Probe every enabled row in the services registry."""
     config = get_config()
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM services WHERE enabled = 1 ORDER BY name"
+    ).fetchall()
+    conn.close()
+
+    # Prefer live config URLs for the core three
+    url_overrides = {
+        "shadowcast": config.get("shadowcast_url"),
+        "apf": config.get("apf_url"),
+        "ollama": config.get("ollama_url"),
+    }
+
     results = {}
-
-    # Check ShadowCast
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{config['shadowcast_url']}/api/health")
-            results["shadowcast"] = {
-                "status": "online" if r.status_code == 200 else "error",
-                "url": config["shadowcast_url"],
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for row in rows:
+            name = row["name"]
+            base = url_overrides.get(name) or row["base_url"]
+            path = row["health_path"] or "/api/health"
+            url = base.rstrip("/") + (path if path.startswith("/") else f"/{path}")
+            entry = {
+                "status": "offline",
+                "url": base,
+                "ui_url": row["ui_url"] or "",
+                "kind": row["kind"],
             }
-    except Exception:
-        results["shadowcast"] = {"status": "offline", "url": config["shadowcast_url"]}
-
-    # Check APF
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{config['apf_url']}/api/health")
-            results["apf"] = {
-                "status": "online" if r.status_code == 200 else "error",
-                "url": config["apf_url"],
-            }
-    except Exception:
-        results["apf"] = {"status": "offline", "url": config["apf_url"]}
-
-    # Check Ollama
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            r = await client.get(f"{config['ollama_url']}/api/tags")
-            results["ollama"] = {
-                "status": "online" if r.status_code == 200 else "error",
-                "url": config["ollama_url"],
-            }
-    except Exception:
-        results["ollama"] = {"status": "offline", "url": config["ollama_url"]}
-
+            try:
+                r = await client.get(url)
+                entry["status"] = "online" if r.status_code == 200 else "error"
+            except Exception:
+                entry["status"] = "offline"
+            results[name] = entry
     return results
 
 
@@ -850,6 +1054,7 @@ async def get_running_models():
 async def list_products(
     status: Optional[str] = None,
     marketplace: Optional[str] = None,
+    q: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
 ):
@@ -862,6 +1067,10 @@ async def list_products(
     if marketplace:
         query += " AND marketplace = ?"
         params.append(marketplace)
+    if q:
+        query += " AND (name LIKE ? OR description LIKE ? OR category LIKE ?)"
+        like = f"%{q}%"
+        params.extend([like, like, like])
     query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     rows = conn.execute(query, params).fetchall()
@@ -873,6 +1082,10 @@ async def list_products(
     if marketplace:
         count_query += " AND marketplace = ?"
         count_params.append(marketplace)
+    if q:
+        count_query += " AND (name LIKE ? OR description LIKE ? OR category LIKE ?)"
+        like = f"%{q}%"
+        count_params.extend([like, like, like])
     count = conn.execute(count_query, count_params).fetchone()["cnt"]
     conn.close()
     return {"products": [dict(r) for r in rows], "total": count}
@@ -1006,22 +1219,57 @@ Provide a brief analysis covering:
 @app.post("/api/products/refresh")
 async def refresh_products_from_apf(req: ProductRefresh, background_tasks: BackgroundTasks):
     """Trigger APF marketplace scrape (can take up to 15 min for digistore24)."""
+    if req.marketplace not in MARKETPLACES:
+        raise HTTPException(status_code=400, detail=f"Unknown marketplace: {req.marketplace}")
     config = get_config()
 
     async def _run_refresh():
+        conn = get_db()
+        conn.execute(
+            """INSERT INTO refresh_runs (marketplace, status, started_at)
+               VALUES (?, 'running', datetime('now'))""",
+            (req.marketplace,),
+        )
+        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+        conn.close()
         try:
             async with httpx.AsyncClient(timeout=900.0) as client:
                 result = await _apf_trpc_post(
                     client, config, "products.refresh", {"platform": req.marketplace}
                 )
+                count = 0
+                if isinstance(result, dict):
+                    count = int(result.get("productsCount") or result.get("count") or 0)
+                conn = get_db()
                 if result is None:
+                    conn.execute(
+                        """UPDATE refresh_runs SET status = 'error', finished_at = datetime('now'),
+                           error = ? WHERE id = ?""",
+                        ("APF returned null", run_id),
+                    )
                     log_activity("apf_refresh_failed", req.marketplace)
                 else:
+                    conn.execute(
+                        """UPDATE refresh_runs SET status = 'ok', finished_at = datetime('now'),
+                           product_count = ? WHERE id = ?""",
+                        (count, run_id),
+                    )
                     log_activity(
                         "apf_refreshed",
-                        f"{req.marketplace}: {result.get('productsCount', '?')} products",
+                        f"{req.marketplace}: {count} products",
                     )
+                conn.commit()
+                conn.close()
         except Exception as e:
+            conn = get_db()
+            conn.execute(
+                """UPDATE refresh_runs SET status = 'error', finished_at = datetime('now'),
+                   error = ? WHERE id = ?""",
+                (str(e)[:500], run_id),
+            )
+            conn.commit()
+            conn.close()
             log_activity("apf_refresh_failed", f"{req.marketplace}: {e}")
 
     background_tasks.add_task(_run_refresh)
@@ -1084,7 +1332,7 @@ async def reenrich_product(product_id: str):
 @app.get("/api/apf/credentials")
 async def get_apf_credentials():
     config = get_config()
-    platforms = ["warriorplus", "digistore24", "clickbank", "shareasale"]
+    platforms = list(MARKETPLACES)
     async with httpx.AsyncClient(timeout=10.0) as client:
         out = {}
         for platform in platforms:
@@ -1199,6 +1447,33 @@ async def create_video_job(req: VideoJobCreate, background_tasks: BackgroundTask
             )
 
     config = get_config()
+    active = _count_active_jobs(conn)
+    if active >= MAX_CONCURRENT_JOBS:
+        conn.close()
+        raise HTTPException(
+            status_code=429,
+            detail=f"Maximum {MAX_CONCURRENT_JOBS} concurrent jobs — wait for active jobs to finish",
+        )
+
+    # Preflight: ShadowCast readiness (block queue when ffmpeg/LLM/TTS down)
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            rr = await client.get(f"{config['shadowcast_url']}/api/readiness")
+            if rr.status_code == 200:
+                readiness = rr.json()
+                ready = readiness.get("ready")
+                if ready is False:
+                    blockers = readiness.get("blockers") or readiness.get("components") or readiness
+                    conn.close()
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"ShadowCast not ready: {blockers}",
+                    )
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # readiness endpoint optional if SC older
+
     job_id = str(uuid.uuid4())
     model = req.script_model or config.get("default_script_model", "llama3.1:8b")
 
@@ -1215,6 +1490,7 @@ async def create_video_job(req: VideoJobCreate, background_tasks: BackgroundTask
         "use_tts": req.use_tts,
         "tts_provider": req.tts_provider or "auto",
         "tts_voice": req.tts_voice,
+        "video_preset": req.video_preset or "medium",
         "script_model": model,
     }
 
@@ -1282,6 +1558,16 @@ async def run_video_job(job_id: str):
             product_info, content_style = await _resolve_shadowcast_product_info(
                 client, config, product, allow_thin=False
             )
+            product_info = _apply_ai_analysis(product, product_info)
+
+            if _is_job_cancelled(job_id):
+                conn.execute(
+                    """UPDATE video_jobs SET status = 'cancelled',
+                       error_message = 'Cancelled before ShadowCast submit' WHERE id = ?""",
+                    (job_id,),
+                )
+                conn.commit()
+                return
 
             hook_types = job_options.get("hook_types") or ["curiosity"]
             if isinstance(hook_types, str):
@@ -1301,6 +1587,7 @@ async def run_video_job(job_id: str):
                 "use_tts": bool(job_options.get("use_tts", False)),
                 "tts_provider": job_options.get("tts_provider") or "auto",
                 "tts_voice": job_options.get("tts_voice"),
+                "video_preset": job_options.get("video_preset") or "medium",
             }
 
             r = await client.post(
@@ -1326,6 +1613,14 @@ async def run_video_job(job_id: str):
         max_polls = 360  # 30 min max (5s intervals)
         for _ in range(max_polls):
             await asyncio.sleep(5)
+            if _is_job_cancelled(job_id):
+                conn.execute(
+                    """UPDATE video_jobs SET status = 'cancelled',
+                       error_message = 'Cancelled while polling ShadowCast' WHERE id = ?""",
+                    (job_id,),
+                )
+                conn.commit()
+                return
             async with httpx.AsyncClient(timeout=10.0) as client:
                 r = await client.get(f"{config['shadowcast_url']}/api/status/{sc_job_id}")
                 if r.status_code != 200:
@@ -1380,6 +1675,65 @@ async def run_video_job(job_id: str):
                 log_activity("job_completed", f"Job {job_id} for {product['name']}")
                 return
 
+            elif sc_status == "partial":
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    r = await client.get(f"{config['shadowcast_url']}/api/results/{sc_job_id}")
+                    result = r.json() if r.status_code == 200 else {}
+                short_path = ""
+                long_path = ""
+                hooks = result.get("results", {})
+                for hook_data in hooks.values():
+                    videos = hook_data.get("videos", {}) if isinstance(hook_data, dict) else {}
+                    if "short_form" in videos:
+                        short_path = f"{config['shadowcast_url']}/api/download/{sc_job_id}/{videos['short_form']}"
+                    if "long_form" in videos:
+                        long_path = f"{config['shadowcast_url']}/api/download/{sc_job_id}/{videos['long_form']}"
+                missing = (
+                    status_data.get("missing")
+                    or status_data.get("missing_outputs")
+                    or result.get("missing")
+                    or []
+                )
+                progress_meta["missing"] = missing
+                progress_meta["results_summary"] = {
+                    k: {"videos": v.get("videos", {})} for k, v in hooks.items() if isinstance(v, dict)
+                }
+                progress_meta["partial"] = True
+                conn.execute(
+                    """UPDATE video_jobs SET
+                    status = 'partial',
+                    short_form_path = ?,
+                    long_form_path = ?,
+                    script_json = ?,
+                    error_message = ?,
+                    completed_at = datetime('now')
+                    WHERE id = ?""",
+                    (
+                        short_path,
+                        long_path,
+                        _json_dumps(progress_meta),
+                        f"Partial render — missing: {missing}" if missing else "Partial render",
+                        job_id,
+                    ),
+                )
+                conn.commit()
+                log_activity("job_partial", f"Job {job_id} for {product['name']}")
+                return
+
+            elif sc_status in ("cancelled", "cancelling"):
+                conn.execute(
+                    """UPDATE video_jobs SET status = 'cancelled',
+                       error_message = ?, script_json = ? WHERE id = ?""",
+                    (
+                        status_data.get("message") or "Cancelled in ShadowCast",
+                        _json_dumps(progress_meta),
+                        job_id,
+                    ),
+                )
+                conn.commit()
+                log_activity("job_cancelled", f"Job {job_id} for {product['name']}")
+                return
+
             elif sc_status == "error":
                 errors = status_data.get("errors", ["Unknown error"])
                 raise Exception(f"ShadowCast error: {'; '.join(errors)}")
@@ -1418,11 +1772,53 @@ async def get_job(job_id: str):
 
 @app.delete("/api/jobs/{job_id}")
 async def delete_job(job_id: str):
+    """Soft-cancel MC poller; best-effort ShadowCast POST /api/cancel/{job_id}."""
+    _cancelled_jobs.add(job_id)
     conn = get_db()
-    conn.execute("DELETE FROM video_jobs WHERE id = ?", (job_id,))
-    conn.commit()
+    job = conn.execute("SELECT * FROM video_jobs WHERE id = ?", (job_id,)).fetchone()
+    sc_job_id = None
+    if job:
+        meta = _json_loads(job["script_json"] if "script_json" in job.keys() else "{}", {})
+        if isinstance(meta, dict):
+            sc_job_id = meta.get("shadowcast_job_id")
+        conn.execute(
+            """UPDATE video_jobs SET status = 'cancelled',
+               error_message = 'Cancelled by operator' WHERE id = ? AND status IN
+               ('queued', 'generating_script', 'rendering')""",
+            (job_id,),
+        )
+        conn.execute("DELETE FROM video_jobs WHERE id = ?", (job_id,))
+        conn.commit()
     conn.close()
-    return {"status": "deleted"}
+
+    cancel_attempted = False
+    cancel_ok = False
+    cancel_detail = None
+    if sc_job_id:
+        cancel_attempted = True
+        config = get_config()
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.post(
+                    f"{config['shadowcast_url']}/api/cancel/{sc_job_id}",
+                    headers=_service_headers(config),
+                )
+                cancel_ok = r.status_code in (200, 201, 204)
+                try:
+                    cancel_detail = r.json()
+                except Exception:
+                    cancel_detail = {"status_code": r.status_code, "text": r.text[:200]}
+        except Exception as e:
+            cancel_ok = False
+            cancel_detail = {"error": str(e)}
+
+    return {
+        "status": "deleted",
+        "cancelled": True,
+        "shadowcast_cancel_attempted": cancel_attempted,
+        "shadowcast_cancel_ok": cancel_ok,
+        "shadowcast_cancel_detail": cancel_detail,
+    }
 
 
 # ── Content Calendar ──────────────────────────────────────────────────
@@ -1447,10 +1843,20 @@ async def list_calendar_events(
 async def create_calendar_event(event: CalendarEventCreate):
     conn = get_db()
     event_id = str(uuid.uuid4())
+    sc_job_id = event.shadowcast_job_id
+    if not sc_job_id and event.video_job_id:
+        job = conn.execute(
+            "SELECT script_json FROM video_jobs WHERE id = ?", (event.video_job_id,)
+        ).fetchone()
+        if job:
+            meta = _json_loads(job["script_json"], {})
+            if isinstance(meta, dict):
+                sc_job_id = meta.get("shadowcast_job_id") or ""
     conn.execute(
         """INSERT INTO calendar_events
-        (id, title, description, event_type, scheduled_date, product_id, video_job_id, platform)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (id, title, description, event_type, scheduled_date, product_id, video_job_id,
+         platform, shadowcast_job_id, publish_target)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             event_id,
             event.title,
@@ -1460,6 +1866,8 @@ async def create_calendar_event(event: CalendarEventCreate):
             event.product_id,
             event.video_job_id,
             event.platform,
+            sc_job_id or "",
+            event.publish_target or event.platform,
         ),
     )
     conn.commit()
@@ -1470,13 +1878,91 @@ async def create_calendar_event(event: CalendarEventCreate):
 
 @app.put("/api/calendar/{event_id}/status")
 async def update_calendar_status(event_id: str, status: str):
+    """Flip status; when moving to published, attempt ShadowCast schedule/publish."""
     conn = get_db()
+    event = conn.execute(
+        "SELECT * FROM calendar_events WHERE id = ?", (event_id,)
+    ).fetchone()
+    if not event:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    publish_result = None
+    if status == "published" and event["shadowcast_job_id"]:
+        config = get_config()
+        platform = event["publish_target"] or event["platform"] or "youtube"
+        sc_job_id = event["shadowcast_job_id"]
+        hook_type = "curiosity"
+        video_format = "short_form"
+        product_slug = None
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                # Prefer variant metadata from ShadowCast postable listing
+                try:
+                    pr = await client.get(f"{config['shadowcast_url']}/api/jobs/postable")
+                    if pr.status_code == 200:
+                        jobs = pr.json().get("jobs") or []
+                        match = next((j for j in jobs if j.get("job_id") == sc_job_id), None)
+                        variants = (match or {}).get("variants") or []
+                        if variants:
+                            hook_type = variants[0].get("hook_type") or hook_type
+                            video_format = variants[0].get("video_format") or video_format
+                            product_slug = variants[0].get("product_slug") or None
+                except Exception:
+                    pass
+
+                # Prefer schedule when a future date is set; otherwise publish now
+                schedule_body = {
+                    "job_id": sc_job_id,
+                    "platform": platform,
+                    "scheduled_time": event["scheduled_date"],
+                    "hook_type": hook_type,
+                    "video_format": video_format,
+                    "caption": event["title"] or "",
+                    "hashtags": [],
+                }
+                if product_slug:
+                    schedule_body["product_slug"] = product_slug
+                r = await client.post(
+                    f"{config['shadowcast_url']}/api/social/schedule",
+                    json=schedule_body,
+                    headers=_service_headers(config),
+                )
+                if r.status_code not in (200, 201):
+                    publish_body = {
+                        "job_id": sc_job_id,
+                        "platform": platform,
+                        "hook_type": hook_type,
+                        "video_format": video_format,
+                    }
+                    if product_slug:
+                        publish_body["product_slug"] = product_slug
+                    r = await client.post(
+                        f"{config['shadowcast_url']}/api/publish",
+                        json=publish_body,
+                        headers=_service_headers(config),
+                    )
+                if r.status_code in (200, 201):
+                    publish_result = r.json()
+                    log_activity("calendar_published", f"{event_id} via {platform}")
+                else:
+                    conn.close()
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"ShadowCast publish failed: {r.status_code} {r.text[:200]}",
+                    )
+        except HTTPException:
+            raise
+        except Exception as e:
+            conn.close()
+            raise HTTPException(status_code=502, detail=f"Publish failed: {e}")
+
     conn.execute(
         "UPDATE calendar_events SET status = ? WHERE id = ?", (status, event_id)
     )
     conn.commit()
     conn.close()
-    return {"status": "updated"}
+    return {"status": "updated", "publish_result": publish_result}
 
 
 @app.delete("/api/calendar/{event_id}")
@@ -1551,3 +2037,26 @@ async def get_activity(limit: int = 50):
     ).fetchall()
     conn.close()
     return {"activity": [dict(r) for r in rows]}
+
+
+# ── Mount control-plane routers ───────────────────────────────────────
+from apf_control import router as apf_control_router  # noqa: E402
+from shadowcast_control import router as shadowcast_control_router  # noqa: E402
+from publish_control import router as publish_control_router  # noqa: E402
+from ops_control import router as ops_control_router  # noqa: E402
+from scheduler import start_scheduler, stop_scheduler  # noqa: E402
+
+app.include_router(apf_control_router)
+app.include_router(shadowcast_control_router)
+app.include_router(publish_control_router)
+app.include_router(ops_control_router)
+
+
+@app.on_event("startup")
+async def _on_startup():
+    start_scheduler()
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    stop_scheduler()

@@ -8,6 +8,7 @@ const statusStyles: Record<string, string> = {
   offline: 'badge-error',
   error: 'badge-error',
   completed: 'badge-success',
+  partial: 'badge-warning',
   new: 'badge-info',
   analyzed: 'badge-info',
   approved: 'badge-success',
@@ -19,6 +20,11 @@ const statusStyles: Record<string, string> = {
   scheduled: 'badge-info',
   published: 'badge-success',
   cancelled: 'badge-neutral',
+  cancelling: 'badge-warning',
+  interested: 'badge-info',
+  researching: 'badge-warning',
+  promoting: 'badge-success',
+  archived: 'badge-neutral',
 }
 
 export default function StatusBadge({ status, size = 'sm' }: StatusBadgeProps) {

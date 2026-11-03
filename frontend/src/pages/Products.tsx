@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
-import { api } from '../utils/api'
+import { api, MARKETPLACES } from '../utils/api'
 import StatusBadge from '../components/StatusBadge'
 import {
-  Package, Search, Download, Brain, Video, RefreshCw, ExternalLink, CloudDownload, Check, X,
+  Package, Search, Download, Brain, Video, RefreshCw, ExternalLink, CloudDownload, Check, X, Bookmark, Sparkles,
 } from 'lucide-react'
 
 interface Product {
@@ -18,13 +18,12 @@ interface Product {
   status: string
   ai_analysis: string
   created_at: string
+  apf_product_id?: string
   recommended_content_style?: string
   product_info_json?: string
   enriched_payload?: string
   review_brief?: string
 }
-
-const MARKETPLACES = ['warriorplus', 'digistore24', 'clickbank', 'shareasale']
 
 const HOOK_OPTIONS = [
   { id: 'curiosity', label: 'Curiosity' },
@@ -74,8 +73,17 @@ export default function Products() {
   const [audioEnabled, setAudioEnabled] = useState(true)
   const [audioMood, setAudioMood] = useState('auto')
   const [useTts, setUseTts] = useState(false)
+  const [ttsProvider, setTtsProvider] = useState('auto')
+  const [ttsVoice, setTtsVoice] = useState('')
+  const [videoPreset, setVideoPreset] = useState('medium')
   const [creatingJob, setCreatingJob] = useState(false)
   const [models, setModels] = useState<string[]>([])
+  const [tab, setTab] = useState<'products' | 'bookmarks'>('products')
+  const [bookmarks, setBookmarks] = useState<any[]>([])
+  const [enriching, setEnriching] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [daemon, setDaemon] = useState<any>(null)
+  const [ttsCatalog, setTtsCatalog] = useState<any>(null)
 
   const fetchProducts = async () => {
     setLoading(true)
@@ -83,6 +91,7 @@ export default function Products() {
       const params: Record<string, string> = {}
       if (filterMarketplace) params.marketplace = filterMarketplace
       if (filterStatus) params.status = filterStatus
+      if (searchQuery.trim()) params.q = searchQuery.trim()
       const data = await api.getProducts(params)
       setProducts(data.products)
       setTotal(data.total)
@@ -93,7 +102,7 @@ export default function Products() {
     }
   }
 
-  useEffect(() => { fetchProducts() }, [filterMarketplace, filterStatus])
+  useEffect(() => { fetchProducts() }, [filterMarketplace, filterStatus, searchQuery])
 
   useEffect(() => {
     api.ollamaModels().then((d) => {
@@ -104,7 +113,22 @@ export default function Products() {
     api.getConfig().then((c) => {
       if (c.default_script_model) setScriptModel(c.default_script_model)
     }).catch(() => {})
+    api.apfDaemon().then(setDaemon).catch(() => {})
+    api.shadowcastTtsProviders().then(setTtsCatalog).catch(() => {})
   }, [])
+
+  const fetchBookmarks = async () => {
+    try {
+      const data = await api.getBookmarks()
+      setBookmarks(data.bookmarks || [])
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  useEffect(() => {
+    if (tab === 'bookmarks') fetchBookmarks()
+  }, [tab])
 
   const handleImport = async () => {
     setImporting(true)
@@ -120,6 +144,14 @@ export default function Products() {
   }
 
   const handleScrape = async () => {
+    if (importMarketplace === 'digistore24') {
+      const d = daemon || (await api.apfDaemon().catch(() => null))
+      setDaemon(d)
+      if (!d || d.status !== 'online') {
+        alert('Digistore daemon is offline (127.0.0.1:3219). Start it before scraping Digistore.')
+        return
+      }
+    }
     setScraping(true)
     try {
       await api.refreshProducts(importMarketplace)
@@ -128,6 +160,22 @@ export default function Products() {
       alert(`Scrape failed: ${e.message}`)
     } finally {
       setScraping(false)
+    }
+  }
+
+  const handleEnrich = async () => {
+    setEnriching(true)
+    try {
+      const apfIds = selectedIds
+        .map((id) => products.find((p) => p.id === id)?.apf_product_id)
+        .filter(Boolean)
+        .map((id) => Number(id))
+      await api.queueEnrichment(apfIds.length ? apfIds : undefined)
+      alert(apfIds.length ? `Enrichment queued for ${apfIds.length} products` : 'Enrichment queued for all pending')
+    } catch (e: any) {
+      alert(`Enrich failed: ${e.message}`)
+    } finally {
+      setEnriching(false)
     }
   }
 
@@ -202,7 +250,9 @@ export default function Products() {
         audio_enabled: audioEnabled,
         audio_mood: audioMood,
         use_tts: useTts,
-        tts_provider: 'auto',
+        tts_provider: ttsProvider || 'auto',
+        tts_voice: ttsVoice || null,
+        video_preset: videoPreset,
       })
       alert(`Video job queued for "${jobModalProduct.name}"`)
       setJobModalProduct(null)
@@ -213,9 +263,7 @@ export default function Products() {
     }
   }
 
-  const filtered = products.filter((p) =>
-    !searchQuery || p.name.toLowerCase().includes(searchQuery.toLowerCase())
-  )
+  const filtered = products
 
   return (
     <div className="space-y-6">
@@ -223,6 +271,9 @@ export default function Products() {
         <div>
           <h1 className="text-2xl font-bold">Product Pipeline</h1>
           <p className="text-brand-text-dim text-sm mt-1">Scrape APF → import → enrich → approve → render</p>
+          <p className="text-xs text-brand-text-dim mt-1">
+            Enrichment queue is fire-and-forget until APF exposes products.enrichmentQueue. 9 APF marketplaces.
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <select className="input-field text-sm" value={importMarketplace} onChange={(e) => setImportMarketplace(e.target.value)}>
@@ -230,9 +281,13 @@ export default function Products() {
               <option key={m} value={m}>{m.charAt(0).toUpperCase() + m.slice(1)}</option>
             ))}
           </select>
-          <button onClick={handleScrape} disabled={scraping} className="btn-secondary flex items-center gap-2">
+          <button onClick={handleScrape} disabled={scraping} className="btn-secondary flex items-center gap-2" title={importMarketplace === 'digistore24' && daemon?.status !== 'online' ? 'Daemon offline' : undefined}>
             {scraping ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CloudDownload className="w-4 h-4" />}
             {scraping ? 'Scraping...' : 'Scrape APF'}
+          </button>
+          <button onClick={handleEnrich} disabled={enriching} className="btn-secondary flex items-center gap-2">
+            {enriching ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+            Enrich
           </button>
           <button onClick={handleImport} disabled={importing} className="btn-primary flex items-center gap-2">
             {importing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
@@ -241,6 +296,76 @@ export default function Products() {
         </div>
       </div>
 
+      {importMarketplace === 'digistore24' && (
+        <div className={`text-xs px-3 py-2 rounded-lg border ${daemon?.status === 'online' ? 'border-brand-success/30 text-brand-success' : 'border-brand-warning/40 text-brand-warning'}`}>
+          Digistore daemon: {daemon?.status || 'unknown'} ({daemon?.url || '127.0.0.1:3219'})
+        </div>
+      )}
+
+      <div className="flex gap-2">
+        <button className={tab === 'products' ? 'btn-primary text-sm' : 'btn-secondary text-sm'} onClick={() => setTab('products')}>
+          Products
+        </button>
+        <button className={tab === 'bookmarks' ? 'btn-primary text-sm flex items-center gap-1' : 'btn-secondary text-sm flex items-center gap-1'} onClick={() => setTab('bookmarks')}>
+          <Bookmark className="w-3.5 h-3.5" /> Bookmarks
+        </button>
+      </div>
+
+      {tab === 'bookmarks' ? (
+        <div className="card p-0 overflow-hidden">
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-brand-border text-left">
+                <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase">Product</th>
+                <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase">Status</th>
+                <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {bookmarks.length === 0 ? (
+                <tr><td colSpan={3} className="px-4 py-8 text-center text-brand-text-dim text-sm">No bookmarks from APF.</td></tr>
+              ) : bookmarks.map((b: any) => {
+                const pid = b.productId ?? b.product_id ?? b.id
+                const status = b.status || 'interested'
+                return (
+                  <tr key={String(pid)} className="border-b border-brand-border/50">
+                    <td className="px-4 py-3 text-sm">{b.name || b.productName || `Product ${pid}`}</td>
+                    <td className="px-4 py-3"><StatusBadge status={status} /></td>
+                    <td className="px-4 py-3">
+                      <select
+                        className="input-field text-xs"
+                        value={status}
+                        onChange={async (e) => {
+                          try {
+                            await api.updateBookmarkStatus(Number(pid), e.target.value)
+                            await fetchBookmarks()
+                          } catch (err: any) {
+                            alert(err.message)
+                          }
+                        }}
+                      >
+                        {['interested', 'researching', 'promoting', 'archived'].map((s) => (
+                          <option key={s} value={s}>{s}</option>
+                        ))}
+                      </select>
+                      <button
+                        className="ml-2 text-xs text-brand-error"
+                        onClick={async () => {
+                          await api.removeBookmark(Number(pid))
+                          await fetchBookmarks()
+                        }}
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+      <>
       <div className="flex items-center gap-3 flex-wrap">
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-brand-text-dim" />
@@ -266,6 +391,7 @@ export default function Products() {
         <table className="w-full">
           <thead>
             <tr className="border-b border-brand-border text-left">
+              <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase w-8"></th>
               <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase">Product</th>
               <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase">Marketplace</th>
               <th className="px-4 py-3 text-xs font-semibold text-brand-text-dim uppercase">Style</th>
@@ -277,12 +403,12 @@ export default function Products() {
             {loading ? (
               Array.from({ length: 5 }).map((_, i) => (
                 <tr key={i} className="border-b border-brand-border/50 animate-pulse">
-                  <td colSpan={5} className="px-4 py-3"><div className="h-4 w-full bg-brand-border rounded" /></td>
+                  <td colSpan={6} className="px-4 py-3"><div className="h-4 w-full bg-brand-border rounded" /></td>
                 </tr>
               ))
             ) : filtered.length === 0 ? (
               <tr>
-                <td colSpan={5} className="px-4 py-12 text-center text-brand-text-dim">
+                <td colSpan={6} className="px-4 py-12 text-center text-brand-text-dim">
                   <Package className="w-8 h-8 mx-auto mb-2 opacity-50" />
                   <p>Scrape APF, then Import to populate products.</p>
                 </td>
@@ -290,6 +416,17 @@ export default function Products() {
             ) : (
               filtered.map((product) => (
                 <tr key={product.id} className="border-b border-brand-border/50 hover:bg-brand-surface/50 cursor-pointer" onClick={() => setSelectedProduct(product)}>
+                  <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.includes(product.id)}
+                      onChange={(e) => {
+                        setSelectedIds((prev) =>
+                          e.target.checked ? [...prev, product.id] : prev.filter((id) => id !== product.id),
+                        )
+                      }}
+                    />
+                  </td>
                   <td className="px-4 py-3">
                     <p className="text-sm font-medium truncate max-w-[250px]">{product.name}</p>
                     <p className="text-xs text-brand-text-dim">{product.category}</p>
@@ -305,6 +442,22 @@ export default function Products() {
                       <button onClick={() => openJobModal(product)} className="p-1.5 rounded-lg hover:bg-brand-card text-brand-text-dim hover:text-brand-success" title="Create job">
                         <Video className="w-4 h-4" />
                       </button>
+                      {product.apf_product_id && (
+                        <button
+                          className="p-1.5 rounded-lg hover:bg-brand-card text-brand-text-dim"
+                          title="Bookmark in APF"
+                          onClick={async () => {
+                            try {
+                              await api.addBookmark(Number(product.apf_product_id))
+                              alert('Bookmarked')
+                            } catch (e: any) {
+                              alert(e.message)
+                            }
+                          }}
+                        >
+                          <Bookmark className="w-4 h-4" />
+                        </button>
+                      )}
                       {product.url && (
                         <a href={product.url} target="_blank" rel="noopener noreferrer" className="p-1.5 rounded-lg hover:bg-brand-card text-brand-text-dim">
                           <ExternalLink className="w-4 h-4" />
@@ -318,6 +471,8 @@ export default function Products() {
           </tbody>
         </table>
       </div>
+      </>
+      )}
 
       <p className="text-xs text-brand-text-dim">Showing {filtered.length} of {total} products</p>
 
@@ -455,6 +610,31 @@ export default function Products() {
                   {AUDIO_MOODS.map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
               </div>
+            )}
+            <div>
+              <label className="text-xs text-brand-text-dim uppercase">Video preset</label>
+              <select className="input-field w-full mt-1" value={videoPreset} onChange={(e) => setVideoPreset(e.target.value)}>
+                <option value="fast">Fast</option>
+                <option value="medium">Medium</option>
+                <option value="best">Best</option>
+              </select>
+            </div>
+            {useTts && (
+              <>
+                <div>
+                  <label className="text-xs text-brand-text-dim uppercase">TTS provider</label>
+                  <select className="input-field w-full mt-1" value={ttsProvider} onChange={(e) => setTtsProvider(e.target.value)}>
+                    <option value="auto">auto</option>
+                    {(ttsCatalog?.providers || ttsCatalog?.tts_providers || ['kokoro', 'piper', 'openai', 'gtts']).map((p: string) => (
+                      <option key={p} value={typeof p === 'string' ? p : p}>{typeof p === 'string' ? p : String(p)}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-brand-text-dim uppercase">TTS voice (optional)</label>
+                  <input className="input-field w-full mt-1" value={ttsVoice} onChange={(e) => setTtsVoice(e.target.value)} placeholder="provider default" />
+                </div>
+              </>
             )}
             <div className="flex items-center gap-3 pt-2 border-t border-brand-border">
               <button onClick={handleCreateJob} disabled={creatingJob} className="btn-primary flex items-center gap-2">

@@ -5,6 +5,19 @@
 
 ---
 
+## Operational docs
+
+- `README.md` — project overview and quick start
+- `CHANGELOG.md` — notable changes
+- `docs/CONFIGURATION.md` — env vars and Settings surface
+- `docs/RECOVERY.md` — machine-loss, working-tree, and SQLite recovery
+- `docs/RUNBOOK.md` — startup/shutdown and service checks
+- `docs/LOCAL_STACK.md` — triple-repo local bring-up
+- `docs/SMOKE_TEST.md` — ecosystem smoke checklist
+- `docs/ARCHITECTURE.md` — component and integration mapping
+
+---
+
 ## Table of Contents
 
 1. [System Prerequisites](#1-system-prerequisites)
@@ -39,7 +52,7 @@ sudo apt install -y nodejs
 # Verify
 python3 --version   # Should be 3.10+
 node --version      # Should be 20+
-npm --version       # Should be 10+
+pnpm --version      # Should be 9+
 
 # Docker (needed for MySQL)
 sudo apt install -y docker.io docker-compose
@@ -152,7 +165,7 @@ git clone https://github.com/unlovedproductions/APF.git
 cd APF
 
 # Install dependencies
-npm install
+pnpm install
 
 # Create .env file
 SECRET="$(openssl rand -hex 32)"
@@ -176,12 +189,12 @@ Set it in Mission Control via Settings → **Internal Service Secret**, or expor
 
 **Push the database schema:**
 ```bash
-npm run db:push
+pnpm run db:push
 ```
 
 **Start APF:**
 ```bash
-npm run dev
+pnpm run dev
 # Runs on http://localhost:3000
 ```
 
@@ -254,8 +267,8 @@ uvicorn main:app --host 0.0.0.0 --port 8100 --reload
 
 # Frontend setup (in another terminal)
 cd ~/mission-control/frontend
-npm install
-npm run dev
+pnpm install
+pnpm run dev
 # Runs on http://localhost:3100
 ```
 

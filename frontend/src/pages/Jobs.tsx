@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api } from '../utils/api'
 import StatusBadge from '../components/StatusBadge'
-import { Video, Trash2, RefreshCw, Eye, Clock, Film, Download, Calendar } from 'lucide-react'
+import {
+  Video, Trash2, RefreshCw, Eye, Clock, Film, Download, Calendar, RotateCcw, Shield,
+} from 'lucide-react'
 
 interface Job {
   id: string
@@ -20,13 +22,23 @@ interface Job {
   completed_at: string
 }
 
-function parseJobMeta(job: Job) {
+function parseJson(raw: string | undefined) {
   try {
-    const raw = job.job_options || job.script_json
     return raw ? JSON.parse(raw) : {}
   } catch {
     return {}
   }
+}
+
+function parseJobMeta(job: Job) {
+  const opts = parseJson(job.job_options)
+  const script = parseJson(job.script_json)
+  return { ...opts, ...script }
+}
+
+function scJobId(job: Job): string | null {
+  const meta = parseJobMeta(job)
+  return meta.shadowcast_job_id || null
 }
 
 export default function Jobs() {
@@ -37,6 +49,10 @@ export default function Jobs() {
   const [scheduleJob, setScheduleJob] = useState<Job | null>(null)
   const [scheduleDate, setScheduleDate] = useState('')
   const [scheduling, setScheduling] = useState(false)
+  const [readiness, setReadiness] = useState<any>(null)
+  const [actionBusy, setActionBusy] = useState<string | null>(null)
+  const [audit, setAudit] = useState<any>(null)
+  const [files, setFiles] = useState<any>(null)
 
   const fetchJobs = async () => {
     setLoading(true)
@@ -50,7 +66,15 @@ export default function Jobs() {
     }
   }
 
-  useEffect(() => { fetchJobs() }, [filterStatus])
+  const fetchReadiness = async () => {
+    try {
+      setReadiness(await api.shadowcastReadiness())
+    } catch {
+      setReadiness(null)
+    }
+  }
+
+  useEffect(() => { fetchJobs(); fetchReadiness() }, [filterStatus])
 
   useEffect(() => {
     const hasActive = jobs.some((j) => ['queued', 'generating_script', 'rendering'].includes(j.status))
@@ -60,12 +84,46 @@ export default function Jobs() {
   }, [jobs])
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Delete this job?')) return
+    if (!confirm('Cancel/delete this job? Soft-cancels MC poller and calls ShadowCast POST /api/cancel/{id}.')) return
     try {
-      await api.deleteJob(id)
+      const result = await api.deleteJob(id)
+      if (result?.shadowcast_cancel_attempted && !result?.shadowcast_cancel_ok) {
+        alert('MC job removed, but ShadowCast cancel failed. Check ShadowCast logs.')
+      } else if (result?.shadowcast_cancel_ok) {
+        alert('MC job removed; ShadowCast cancel acknowledged.')
+      }
       await fetchJobs()
     } catch (e: any) {
       alert(`Delete failed: ${e.message}`)
+    }
+  }
+
+  const handleRetry = async (job: Job) => {
+    const id = scJobId(job)
+    if (!id) return alert('No ShadowCast job id')
+    setActionBusy('retry')
+    try {
+      await api.shadowcastRetryMissing(id)
+      alert('Retry-missing submitted to ShadowCast')
+      await fetchJobs()
+    } catch (e: any) {
+      alert(`Retry failed: ${e.message}`)
+    } finally {
+      setActionBusy(null)
+    }
+  }
+
+  const handleAudit = async (job: Job) => {
+    const id = scJobId(job)
+    if (!id) return alert('No ShadowCast job id')
+    setActionBusy('audit')
+    try {
+      setAudit(await api.shadowcastAudit(id))
+      setFiles(await api.shadowcastFiles(id).catch(() => null))
+    } catch (e: any) {
+      alert(`Audit failed: ${e.message}`)
+    } finally {
+      setActionBusy(null)
     }
   }
 
@@ -73,6 +131,7 @@ export default function Jobs() {
     if (!scheduleJob || !scheduleDate) return
     setScheduling(true)
     try {
+      const meta = parseJobMeta(scheduleJob)
       await api.createCalendarEvent({
         title: scheduleJob.product_name,
         scheduled_date: scheduleDate,
@@ -80,7 +139,9 @@ export default function Jobs() {
         video_job_id: scheduleJob.id,
         platform: 'youtube',
         event_type: 'video_publish',
-        description: `Scheduled from completed job ${scheduleJob.id.slice(0, 8)}`,
+        shadowcast_job_id: meta.shadowcast_job_id || '',
+        publish_target: 'youtube',
+        description: `Scheduled from job ${scheduleJob.id.slice(0, 8)}`,
       })
       setScheduleJob(null)
       setScheduleDate('')
@@ -98,9 +159,13 @@ export default function Jobs() {
       case 'generating_script': return <RefreshCw className="w-5 h-5 text-brand-warning animate-spin" />
       case 'rendering': return <Film className="w-5 h-5 text-brand-accent animate-pulse" />
       case 'completed': return <Video className="w-5 h-5 text-brand-success" />
+      case 'partial': return <Film className="w-5 h-5 text-brand-warning" />
       default: return <Video className="w-5 h-5 text-brand-error" />
     }
   }
+
+  const ready = readiness?.ready !== false
+  const blockers = readiness?.blockers || readiness?.components
 
   return (
     <div className="space-y-6">
@@ -116,13 +181,29 @@ export default function Jobs() {
             <option value="generating_script">Generating Script</option>
             <option value="rendering">Rendering</option>
             <option value="completed">Completed</option>
+            <option value="partial">Partial</option>
             <option value="failed">Failed</option>
+            <option value="cancelled">Cancelled</option>
           </select>
-          <button onClick={fetchJobs} className="btn-secondary flex items-center gap-2">
+          <button onClick={() => { fetchJobs(); fetchReadiness() }} className="btn-secondary flex items-center gap-2">
             <RefreshCw className="w-4 h-4" /> Refresh
           </button>
         </div>
       </div>
+
+      {readiness && (
+        <div className={`card border ${ready ? 'border-brand-success/30' : 'border-brand-warning/40'}`}>
+          <div className="flex items-center gap-2 text-sm">
+            <Shield className={`w-4 h-4 ${ready ? 'text-brand-success' : 'text-brand-warning'}`} />
+            <span className="font-medium">ShadowCast readiness: {ready ? 'ready' : 'blocked'}</span>
+          </div>
+          {!ready && blockers && (
+            <pre className="mt-2 text-xs text-brand-text-dim overflow-auto max-h-24">
+              {typeof blockers === 'string' ? blockers : JSON.stringify(blockers, null, 2)}
+            </pre>
+          )}
+        </div>
+      )}
 
       <div className="space-y-3">
         {loading ? (
@@ -141,7 +222,7 @@ export default function Jobs() {
           jobs.map((job) => {
             const meta = parseJobMeta(job)
             return (
-              <div key={job.id} className="card flex items-center gap-4 hover:border-brand-accent/30 transition-colors cursor-pointer" onClick={() => setSelectedJob(job)}>
+              <div key={job.id} className="card flex items-center gap-4 hover:border-brand-accent/30 transition-colors cursor-pointer" onClick={() => { setSelectedJob(job); setAudit(null); setFiles(null) }}>
                 <div className="w-10 h-10 rounded-lg bg-brand-surface flex items-center justify-center flex-shrink-0">
                   {getStatusIcon(job.status)}
                 </div>
@@ -151,22 +232,27 @@ export default function Jobs() {
                     <span className="text-xs text-brand-text-dim">
                       {job.job_type === 'both' ? 'Short + Long' : job.job_type}
                     </span>
+                    {meta.video_preset && (
+                      <span className="text-xs text-brand-text-dim">preset:{meta.video_preset}</span>
+                    )}
                     {meta.current_step && (
                       <span className="text-xs text-brand-accent">{meta.current_step}</span>
-                    )}
-                    {meta.progress != null && (
-                      <span className="text-xs text-brand-text-dim">{meta.progress}%</span>
                     )}
                   </div>
                 </div>
                 <StatusBadge status={job.status} />
                 <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-                  {job.status === 'completed' && (
+                  {(job.status === 'completed' || job.status === 'partial') && (
                     <button onClick={() => setScheduleJob(job)} className="p-2 rounded-lg hover:bg-brand-surface text-brand-text-dim hover:text-brand-accent" title="Schedule">
                       <Calendar className="w-4 h-4" />
                     </button>
                   )}
-                  <button onClick={() => setSelectedJob(job)} className="p-2 rounded-lg hover:bg-brand-surface text-brand-text-dim">
+                  {job.status === 'partial' && (
+                    <button onClick={() => handleRetry(job)} className="p-2 rounded-lg hover:bg-brand-surface text-brand-text-dim hover:text-brand-warning" title="Retry missing">
+                      <RotateCcw className="w-4 h-4" />
+                    </button>
+                  )}
+                  <button onClick={() => { setSelectedJob(job); handleAudit(job) }} className="p-2 rounded-lg hover:bg-brand-surface text-brand-text-dim" title="Details">
                     <Eye className="w-4 h-4" />
                   </button>
                   <button onClick={() => handleDelete(job.id)} className="p-2 rounded-lg hover:bg-brand-surface text-brand-text-dim hover:text-brand-error">
@@ -189,8 +275,24 @@ export default function Jobs() {
                 <div>
                   <h2 className="text-lg font-bold">{selectedJob.product_name}</h2>
                   <p className="text-sm text-brand-text-dim">Job ID: {selectedJob.id.slice(0, 8)}...</p>
+                  {meta.shadowcast_job_id && (
+                    <p className="text-xs text-brand-text-dim mt-1">SC: {meta.shadowcast_job_id}</p>
+                  )}
                 </div>
                 <StatusBadge status={selectedJob.status} size="md" />
+              </div>
+
+              <div className="flex gap-2 mb-4">
+                {selectedJob.status === 'partial' && (
+                  <button disabled={actionBusy === 'retry'} onClick={() => handleRetry(selectedJob)} className="btn-secondary text-sm flex items-center gap-1">
+                    <RotateCcw className="w-3.5 h-3.5" /> Retry missing
+                  </button>
+                )}
+                {meta.shadowcast_job_id && (
+                  <button disabled={actionBusy === 'audit'} onClick={() => handleAudit(selectedJob)} className="btn-secondary text-sm">
+                    Load audit / files
+                  </button>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-4 mb-4">
@@ -202,6 +304,12 @@ export default function Jobs() {
                   <p className="text-xs text-brand-text-dim">Model</p>
                   <p className="text-sm font-semibold">{selectedJob.script_model || meta.script_model || 'Default'}</p>
                 </div>
+                {meta.video_preset && (
+                  <div className="bg-brand-surface rounded-lg p-3">
+                    <p className="text-xs text-brand-text-dim">Video preset</p>
+                    <p className="text-sm font-semibold">{meta.video_preset}</p>
+                  </div>
+                )}
                 {meta.content_style && (
                   <div className="bg-brand-surface rounded-lg p-3">
                     <p className="text-xs text-brand-text-dim">Style</p>
@@ -212,12 +320,6 @@ export default function Jobs() {
                   <div className="bg-brand-surface rounded-lg p-3">
                     <p className="text-xs text-brand-text-dim">Hooks</p>
                     <p className="text-sm font-semibold">{hooks.join(', ')}</p>
-                  </div>
-                )}
-                {meta.current_step && (
-                  <div className="bg-brand-surface rounded-lg p-3 col-span-2">
-                    <p className="text-xs text-brand-text-dim">Progress</p>
-                    <p className="text-sm font-semibold">{meta.current_step}{meta.progress != null ? ` (${meta.progress}%)` : ''}</p>
                   </div>
                 )}
               </div>
@@ -243,14 +345,18 @@ export default function Jobs() {
                 </div>
               )}
 
-              <div className="flex items-center gap-3 pt-4 border-t border-brand-border">
-                {selectedJob.status === 'completed' && (
-                  <button onClick={() => { setScheduleJob(selectedJob); setSelectedJob(null) }} className="btn-primary flex items-center gap-2">
-                    <Calendar className="w-4 h-4" /> Schedule
-                  </button>
-                )}
-                <button onClick={() => setSelectedJob(null)} className="btn-secondary ml-auto">Close</button>
-              </div>
+              {audit && (
+                <div className="mb-4 bg-brand-surface rounded-lg p-3">
+                  <p className="text-xs text-brand-text-dim mb-1">Audit</p>
+                  <pre className="text-xs overflow-auto max-h-40">{JSON.stringify(audit, null, 2)}</pre>
+                </div>
+              )}
+              {files && (
+                <div className="mb-4 bg-brand-surface rounded-lg p-3">
+                  <p className="text-xs text-brand-text-dim mb-1">Files</p>
+                  <pre className="text-xs overflow-auto max-h-40">{JSON.stringify(files, null, 2)}</pre>
+                </div>
+              )}
             </div>
           </div>
         )
@@ -259,14 +365,13 @@ export default function Jobs() {
       {scheduleJob && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setScheduleJob(null)}>
           <div className="bg-brand-card border border-brand-border rounded-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
-            <h2 className="text-lg font-bold mb-4">Schedule Publish</h2>
-            <p className="text-sm text-brand-text-dim mb-4">{scheduleJob.product_name}</p>
-            <input type="date" className="input-field w-full" value={scheduleDate} onChange={(e) => setScheduleDate(e.target.value)} />
-            <div className="flex items-center gap-3 mt-5">
-              <button onClick={handleSchedule} disabled={scheduling || !scheduleDate} className="btn-primary flex-1">
-                {scheduling ? 'Saving...' : 'Add to Calendar'}
+            <h2 className="text-lg font-bold mb-4">Schedule publish</h2>
+            <input type="datetime-local" className="input-field w-full mb-4" value={scheduleDate} onChange={(e) => setScheduleDate(e.target.value)} />
+            <div className="flex gap-2 justify-end">
+              <button className="btn-secondary" onClick={() => setScheduleJob(null)}>Cancel</button>
+              <button className="btn-primary" disabled={scheduling || !scheduleDate} onClick={handleSchedule}>
+                {scheduling ? 'Saving...' : 'Create event'}
               </button>
-              <button onClick={() => setScheduleJob(null)} className="btn-secondary">Cancel</button>
             </div>
           </div>
         </div>

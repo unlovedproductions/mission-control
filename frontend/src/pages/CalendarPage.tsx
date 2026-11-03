@@ -11,6 +11,7 @@ interface CalendarEvent {
   scheduled_date: string
   product_id: string
   video_job_id: string
+  shadowcast_job_id?: string
   status: string
   platform: string
   created_at: string
@@ -63,6 +64,16 @@ export default function CalendarPage() {
       await fetchEvents()
     } catch (e: any) {
       alert(`Failed: ${e.message}`)
+    }
+  }
+
+  const handleMarkPublished = async (id: string) => {
+    if (!confirm('Mark published? This calls ShadowCast schedule/publish using the linked job.')) return
+    try {
+      await api.updateCalendarStatus(id, 'published')
+      await fetchEvents()
+    } catch (e: any) {
+      alert(`Publish failed: ${e.message}`)
     }
   }
 
@@ -185,6 +196,15 @@ export default function CalendarPage() {
                 </div>
                 <div className="flex items-center gap-2">
                   <StatusBadge status={evt.status} />
+                  {evt.status === 'scheduled' && evt.shadowcast_job_id && (
+                    <button
+                      onClick={() => handleMarkPublished(evt.id)}
+                      className="btn-secondary text-xs"
+                      title="Calls ShadowCast schedule/publish"
+                    >
+                      Mark published
+                    </button>
+                  )}
                   <button onClick={() => handleDelete(evt.id)} className="p-1.5 rounded hover:bg-brand-card text-brand-text-dim hover:text-brand-error">
                     <Trash2 className="w-4 h-4" />
                   </button>

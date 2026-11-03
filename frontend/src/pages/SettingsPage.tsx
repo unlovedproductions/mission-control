@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api } from '../utils/api'
+import { api, MARKETPLACES } from '../utils/api'
 import { Settings, Save, RefreshCw, CheckCircle, Server, Brain, Film, ShoppingBag, Lock, Key } from 'lucide-react'
 
 interface ConfigField {
@@ -24,8 +24,6 @@ const CONFIG_FIELDS: ConfigField[] = [
   { key: 'default_hook_types', label: 'Default Hook Types', description: 'Comma-separated hook ids (e.g. curiosity,listicle)', icon: Brain, group: 'Pipeline' },
   { key: 'default_content_style', label: 'Default Content Style', description: 'Default ShadowCast content style for jobs', icon: Brain, group: 'Pipeline' },
 ]
-
-const MARKETPLACES = ['warriorplus', 'digistore24', 'clickbank', 'shareasale']
 
 export default function SettingsPage() {
   const [config, setConfig] = useState<Record<string, string>>({})
