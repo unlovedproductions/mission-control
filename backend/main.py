@@ -50,7 +50,7 @@ DEFAULT_CONFIG = {
     "apf_session_cookie": "",
 }
 
-SECRET_CONFIG_KEYS = {"internal_service_secret"}
+SECRET_CONFIG_KEYS = {"internal_service_secret", "apf_session_cookie"}
 CONFIG_ALLOWLIST = set(DEFAULT_CONFIG.keys()) | SECRET_CONFIG_KEYS
 
 
@@ -572,6 +572,13 @@ async def _resolve_shadowcast_product_info(
     return info, style
 
 
+def _blank_stored_json(value) -> bool:
+    if value is None:
+        return True
+    text = str(value).strip()
+    return text == "" or text in ("{}", "[]", "null")
+
+
 def _upsert_product_from_apf(
     conn,
     marketplace: str,
@@ -587,7 +594,9 @@ def _upsert_product_from_apf(
     existing = None
     if apf_id:
         existing = conn.execute(
-            "SELECT id FROM products WHERE apf_product_id = ? AND marketplace = ?",
+            "SELECT id, product_info_json, apf_import_token, enriched_payload, "
+            "recommended_content_style, competitors, review_brief "
+            "FROM products WHERE apf_product_id = ? AND marketplace = ?",
             (apf_id, marketplace),
         ).fetchone()
 
@@ -602,6 +611,28 @@ def _upsert_product_from_apf(
                 price = brief["price_display"]
             elif brief.get("recommended_content_style"):
                 recommended_style = _normalize_content_style(brief["recommended_content_style"])
+
+    enriched_payload_json = _json_dumps(enriched_payload) if enriched_payload else ""
+    competitors_json = _json_dumps(competitors)
+    review_brief_json = _json_dumps(review_brief)
+
+    # Failed/empty re-enrich must not wipe previously stored enrichment.
+    if existing:
+        if _blank_stored_json(product_info_json) and not _blank_stored_json(
+            existing["product_info_json"]
+        ):
+            product_info_json = existing["product_info_json"]
+        if not apf_import_token and existing["apf_import_token"]:
+            apf_import_token = existing["apf_import_token"]
+        if not enriched_payload:
+            if not _blank_stored_json(existing["enriched_payload"]):
+                enriched_payload_json = existing["enriched_payload"]
+            if not recommended_style:
+                recommended_style = existing["recommended_content_style"] or ""
+            if not competitors and not _blank_stored_json(existing["competitors"]):
+                competitors_json = existing["competitors"]
+            if not review_brief and not _blank_stored_json(existing["review_brief"]):
+                review_brief_json = existing["review_brief"]
 
     conn.execute(
         """INSERT INTO products
@@ -639,9 +670,9 @@ def _upsert_product_from_apf(
             p.get("description", ""),
             datetime.now().isoformat(),
             recommended_style,
-            _json_dumps(competitors),
-            _json_dumps(review_brief),
-            _json_dumps(enriched_payload),
+            competitors_json,
+            review_brief_json,
+            enriched_payload_json,
             product_info_json,
             apf_import_token,
         ),
