@@ -203,12 +203,12 @@ def _migrate_video_jobs_columns(conn):
 
 
 def _recover_stuck_jobs(conn):
+    # BackgroundTasks die with the process. Any in-flight or never-started job
+    # at startup is already orphaned — age filters leave zombies forever.
     conn.execute(
         """UPDATE video_jobs SET status = 'failed',
            error_message = 'Interrupted — server restarted while job was active'
-           WHERE status IN ('generating_script', 'rendering')
-           AND started_at != ''
-           AND datetime(started_at) < datetime('now', '-35 minutes')"""
+           WHERE status IN ('queued', 'generating_script', 'rendering')"""
     )
 
 
@@ -1346,7 +1346,10 @@ async def run_video_job(job_id: str):
             )
             conn.commit()
 
-            if sc_status == "complete":
+            # ShadowCast ends successful renders as "complete" or "partial"
+            # (any warning / missing optional output → partial, still has videos).
+            # Ignoring "partial" spun the poll until a false 30-minute timeout.
+            if sc_status in ("complete", "partial"):
                 # Fetch results
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     r = await client.get(f"{config['shadowcast_url']}/api/results/{sc_job_id}")
@@ -1363,6 +1366,8 @@ async def run_video_job(job_id: str):
                     if "long_form" in videos:
                         long_path = f"{config['shadowcast_url']}/api/download/{sc_job_id}/{videos['long_form']}"
 
+                progress_meta["shadowcast_status"] = sc_status
+                progress_meta["shadowcast_warnings"] = status_data.get("warnings") or []
                 progress_meta["results_summary"] = {
                     k: {"videos": v.get("videos", {})} for k, v in hooks.items() if isinstance(v, dict)
                 }
@@ -1383,6 +1388,9 @@ async def run_video_job(job_id: str):
             elif sc_status == "error":
                 errors = status_data.get("errors", ["Unknown error"])
                 raise Exception(f"ShadowCast error: {'; '.join(errors)}")
+
+            elif sc_status in ("cancelled", "interrupted"):
+                raise Exception(f"ShadowCast job {sc_status}")
 
         # If we get here, polling timed out
         raise Exception("ShadowCast job timed out after 30 minutes")
