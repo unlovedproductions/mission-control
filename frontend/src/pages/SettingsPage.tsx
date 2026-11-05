@@ -29,6 +29,7 @@ const MARKETPLACES = ['warriorplus', 'digistore24', 'clickbank', 'shareasale']
 
 export default function SettingsPage() {
   const [config, setConfig] = useState<Record<string, string>>({})
+  const [secretsConfigured, setSecretsConfigured] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState<string | null>(null)
   const [saved, setSaved] = useState<string | null>(null)
@@ -39,7 +40,18 @@ export default function SettingsPage() {
   useEffect(() => {
     Promise.all([api.getConfig(), api.getApfCredentials().catch(() => ({ credentials: {} }))])
       .then(([cfg, creds]) => {
-        setConfig(cfg)
+        const next: Record<string, string> = { ...cfg }
+        const configured: Record<string, boolean> = {}
+        // Never bind masked secret display values into inputs — saving them
+        // would overwrite the real INTERNAL_SERVICE_SECRET / session cookie.
+        for (const field of CONFIG_FIELDS) {
+          if (field.secret) {
+            configured[field.key] = Boolean(cfg[field.key])
+            next[field.key] = ''
+          }
+        }
+        setConfig(next)
+        setSecretsConfigured(configured)
         setCredentials(creds.credentials || {})
       })
       .catch(console.error)
@@ -47,10 +59,23 @@ export default function SettingsPage() {
   }, [])
 
   const handleSave = async (key: string) => {
+    const field = CONFIG_FIELDS.find((f) => f.key === key)
+    if (field?.secret && !(config[key] || '').trim()) {
+      alert('Enter a new secret to update. Leave blank to keep the current value.')
+      return
+    }
     setSaving(key)
     try {
-      await api.updateConfig(key, config[key])
+      const result = await api.updateConfig(key, config[key])
+      if (result?.reason === 'refused_masked_secret') {
+        alert('Refused to save a masked secret. Enter the real value.')
+        return
+      }
       setSaved(key)
+      if (field?.secret) {
+        setSecretsConfigured((prev) => ({ ...prev, [key]: true }))
+        setConfig((prev) => ({ ...prev, [key]: '' }))
+      }
       setTimeout(() => setSaved(null), 2000)
     } catch (e: any) {
       alert(`Save failed: ${e.message}`)
@@ -111,13 +136,16 @@ export default function SettingsPage() {
                 </div>
                 <div className="flex-1">
                   <label className="text-sm font-semibold">{field.label}</label>
-                  <p className="text-xs text-brand-text-dim mb-2">{field.description}</p>
+                  <p className="text-xs text-brand-text-dim mb-2">
+                    {field.description}
+                    {field.secret && secretsConfigured[field.key] ? ' — currently set' : ''}
+                  </p>
                   <div className="flex items-center gap-2">
                     <input
                       type={field.secret ? 'password' : 'text'}
                       className="input-field flex-1 font-mono text-sm"
                       value={config[field.key] || ''}
-                      placeholder={field.secret ? '••••••••' : ''}
+                      placeholder={field.secret ? (secretsConfigured[field.key] ? 'Leave blank to keep current' : '••••••••') : ''}
                       onChange={(e) => setConfig({ ...config, [field.key]: e.target.value })}
                     />
                     <button onClick={() => handleSave(field.key)} disabled={saving === field.key}
@@ -180,9 +208,10 @@ export default function SettingsPage() {
             for (const [key, value] of Object.entries(defaults)) {
               await api.updateConfig(key, value)
             }
-            setConfig(defaults)
+            setConfig({ ...defaults })
+            setSecretsConfigured({})
           }}
-          className="px-4 py-2 rounded-lg border border-brand-error/30 text-brand-error text-sm hover:bg-red-900/20 transition-colors"
+          className="btn-secondary text-sm text-brand-error border-brand-error/30"
         >
           Reset to Defaults
         </button>

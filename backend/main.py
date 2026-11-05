@@ -50,8 +50,25 @@ DEFAULT_CONFIG = {
     "apf_session_cookie": "",
 }
 
-SECRET_CONFIG_KEYS = {"internal_service_secret"}
+SECRET_CONFIG_KEYS = {"internal_service_secret", "apf_session_cookie"}
 CONFIG_ALLOWLIST = set(DEFAULT_CONFIG.keys()) | SECRET_CONFIG_KEYS
+
+
+def _mask_secret(value: str) -> str:
+    if not value:
+        return ""
+    return f"{'*' * max(0, len(value) - 4)}{value[-4:]}" if len(value) > 4 else "****"
+
+
+def _is_masked_secret_value(value: str, current: str = "") -> bool:
+    """True when a Settings save is echoing get_public_config's mask back."""
+    if not value or "*" not in value:
+        return False
+    if current and value == _mask_secret(current):
+        return True
+    # Mostly asterisks with at most a short trailing hint (our mask shape).
+    stripped = value.replace("*", "")
+    return value.count("*") >= 4 and len(stripped) <= 4
 
 
 # ── Database ──────────────────────────────────────────────────────────
@@ -227,7 +244,7 @@ def get_public_config() -> dict:
     out = {}
     for key, value in cfg.items():
         if key in SECRET_CONFIG_KEYS and value:
-            out[key] = f"{'*' * max(0, len(value) - 4)}{value[-4:]}" if len(value) > 4 else "****"
+            out[key] = _mask_secret(value)
         else:
             out[key] = value
     return out
@@ -740,6 +757,18 @@ async def get_all_config():
 async def update_config(update: ConfigUpdate):
     if update.key not in CONFIG_ALLOWLIST:
         raise HTTPException(status_code=400, detail=f"Unknown config key: {update.key}")
+
+    # Settings binds GET /api/config into password inputs. Saving without retyping
+    # would persist the masked display string and break APF/ShadowCast auth.
+    if update.key in SECRET_CONFIG_KEYS:
+        current = get_config().get(update.key, "")
+        if _is_masked_secret_value(update.value, current):
+            return {
+                "status": "unchanged",
+                "key": update.key,
+                "reason": "refused_masked_secret",
+            }
+
     conn = get_db()
     conn.execute(
         "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
@@ -747,7 +776,12 @@ async def update_config(update: ConfigUpdate):
     )
     conn.commit()
     conn.close()
-    log_activity("config_updated", f"{update.key} = {update.value}")
+    detail = (
+        f"{update.key} = [redacted]"
+        if update.key in SECRET_CONFIG_KEYS
+        else f"{update.key} = {update.value}"
+    )
+    log_activity("config_updated", detail)
     return {"status": "updated", "key": update.key}
 
 
